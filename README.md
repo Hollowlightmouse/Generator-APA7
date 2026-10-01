@@ -1,158 +1,157 @@
 # Skill `generar-pdf-apa`
 
-Genera un documento académico en **Word (.docx) y PDF** con las **Normas APA 7ª edición**, listo para entregar: portada institucional, tabla de contenido e índices de tablas/figuras con números de página reales, todo a partir de un Markdown `.md` de origen (extraído con MinerU/Docling, por ejemplo).
+Builds a **Word (.docx) and PDF** academic document following the **APA 7th edition** rules, ready to submit: institutional cover page, table of contents and lists of tables/figures with real page numbers, all from a source Markdown `.md` (extracted with MinerU/Docling, for example).
 
-> **Motor de exportación: LibreOffice (headless). No se requiere Microsoft Word.**
+> **Export engine: LibreOffice (headless). Microsoft Word is not required.**
 
 ---
 
-## Qué es y para qué sirve
+## What it is and what it is for
 
-Es una **skill de agente** (un `SKILL.md` + scripts auxiliares) que convierte la salida —normalmente imperfecta— de una conversión de PDF a Markdown en un trabajo académico **final, verificado y presentable**.
+It is an **agent skill** (a `SKILL.md` plus helper scripts) that turns the output — usually imperfect — of a PDF-to-Markdown conversion into a **final, verified and presentable** academic paper.
 
-No es un conversor de PDF a Word: parte de un `.md` que ya existe. Lo que hace es **estructurarlo y formalizarlo**:
+It is not a PDF-to-Word converter: it starts from a `.md` that already exists. What it does is **structure and formalize** it:
 
-- **Portada institucional** con layout en 3 zonas (título arriba, autores en el centro vertical, bloque institucional anclado abajo) y logo opcional solo si lo aportas.
-- **Tabla de contenido siempre** e **índice de tablas y figuras solo cuando existen**, con páginas reales vía campos `PAGEREF` que se actualizan al abrir el documento.
-- **Corrección automática** de artefactos de la conversión: palabras pegadas (`2:Diferenciaciónentre Bugs` → `2: Diferenciación entre Bugs`), marcadores de lista duplicados (`• •`, `1. 1.`), numeración pegada (`ACTIVIDAD1:`), siempre respetando nombres propios y términos técnicos.
-- **Referencias corregidas a APA 7**: orden alfabético, sangría francesa y cursivas donde corresponde, aunque el `.md` ya las traiga como lista.
-- **Tablas amplias en hoja horizontal** puntual (permitido por APA 7) para matrices comparativas que no caben en vertical.
-- **Verificación final con `pymupdf`** antes de entregar: portada, índices, leyendas, hojas horizontales, notas y referencias.
-- Entrega **ambos archivos** (`.docx` y `.pdf`).
+- **Institutional cover page** with a 3-zone layout (title at the top, authors vertically centered, institutional block anchored at the bottom) and an optional logo only if you provide it.
+- **Table of contents always**, and **lists of tables and figures only when they exist**, with real pages via `PAGEREF` fields that update when the document is opened.
+- **Automatic correction** of conversion artifacts: glued words (`2:Diferenciaciónentre Bugs` → `2: Diferenciación entre Bugs`), duplicated list markers (`• •`, `1. 1.`), glued numbering (`ACTIVIDAD1:`), always respecting proper nouns and technical terms.
+- **References normalized to APA 7**: alphabetical order, hanging indent and italics where appropriate, even if the `.md` already brings them as a list.
+- **Wide tables on an occasional landscape page** (allowed by APA 7) for comparison matrices that do not fit in portrait.
+- **Final verification with `pymupdf`** before delivering: cover, indices, captions, landscape pages, notes and references.
+- Delivers **both files** (`.docx` and `.pdf`).
 
-## Requisitos (herramientas que necesita)
+## Requirements (tools it needs)
 
-| Herramienta | Para qué se usa | Cómo se consigue |
+| Tool | What it is used for | How to get it |
 |---|---|---|
-| **PowerShell 5.1+** | ejecutar los scripts de la skill | incluido en Windows |
-| **Node.js LTS + npm** | generar el `.docx` con la librería `docx` | `winget install OpenJS.NodeJS.LTS` o `brew install node` |
-| **Librería `docx` (npm)** | construir portada, TOC, índices y tablas | `npm install docx@9.7.1 --no-save` |
-| **Python 3 + `pymupdf`** | verificar el PDF final | `pip install pymupdf` |
-| **LibreOffice** | **único motor** de conversión `.docx → .pdf` | `winget install TheDocumentFoundation.LibreOffice` o `brew install --cask libreoffice` |
-| **Conexión a internet** | descargas de winget/brew, npm y pip | — |
+| **PowerShell 5.1+** | running the skill scripts | included in Windows |
+| **Node.js LTS + npm** | generating the `.docx` with the `docx` library | `winget install OpenJS.NodeJS.LTS` or `brew install node` |
+| **`docx` library (npm)** | building the cover, TOC, indices and tables | `npm install docx@9.7.1 --no-save` |
+| **Python 3 + `pymupdf`** | verifying the final PDF | `pip install pymupdf` |
+| **LibreOffice** | **the only engine** for `.docx → .pdf` conversion | `winget install TheDocumentFoundation.LibreOffice` or `brew install --cask libreoffice` |
+| **Internet connection** | winget/brew, npm and pip downloads | — |
 
-La skill valida estas herramientas automáticamente antes de tocar el documento (**PASO 0 / preflight**). Si falta alguna, la instala sola; si algo no puede instalarse, **se detiene y avisa** sin transformar el documento.
+The skill validates these tools automatically before touching the document (**STEP 0 / preflight**). If any is missing, it installs it; if something cannot be installed, it **stops and warns** without transforming the document.
 
-Rutas de herramientas sobrescribibles por variable de entorno: `APA7_SOFFICE`, `APA7_PYTHON`, `APA7_NODEDIR`, `APA7_WORKDIR`, `APA7_SKILL_ROOT`. Detalle en [`generar-pdf-apa/references/requisitos-sistema.md`](generar-pdf-apa/references/requisitos-sistema.md).
+Tool paths overridable by environment variable: `APA7_SOFFICE`, `APA7_PYTHON`, `APA7_NODEDIR`, `APA7_WORKDIR`, `APA7_SKILL_ROOT`. Details in [`generar-pdf-apa/references/system-requirements.md`](generar-pdf-apa/references/system-requirements.md).
 
-## Instalación
+## Installation
 
-1. **Copia la carpeta** `generar-pdf-apa/` al directorio de skills de tu agente de IA, de modo que `SKILL.md` quede en la raíz del directorio de skills. Por ejemplo: `<tu-usuario>\.agents\skills\generar-pdf-apa`.
-2. **El entorno se arma solo.** La primera vez se ejecuta el preflight:
+1. **Copy the** `generar-pdf-apa/` **folder** into your AI agent's skills directory, so that `SKILL.md` ends up at the root of the skills directory. For example: `<your-user>\.agents\skills\generar-pdf-apa`.
+2. **The environment sets itself up.** The first time, run the preflight:
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File "...\generar-pdf-apa\scripts\comprobar-entorno.ps1"
    ```
 
-   Si sale `FALTAN:`, el instalador automático lo resuelve y vuelve a verificar:
+   If it returns `RESULT: MISSING`, the automatic installer resolves it and re-checks:
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File "...\generar-pdf-apa\scripts\instalar-entorno.ps1"
    ```
 
-   > No instales nada a mano ni transformes documentos con herramientas faltantes.
+   > Do not install anything by hand and do not transform documents with missing tools.
 
-La dependencia `docx` se instala en `generar-pdf-apa/.work/node_modules`, dentro de la propia skill: así `require('docx')` resuelve siempre, sin importar desde dónde se ejecute. Esa carpeta es estado generado y está en `.gitignore`.
+The `docx` dependency is installed in `generar-pdf-apa/.work/node_modules`, inside the skill itself: that way `require('docx')` always resolves, no matter where it is run from. That folder is generated state and is in `.gitignore`.
 
-## Cómo se usa
+## How to use it
 
-La skill se **activa por intención**: basta con que pidas un documento académico montado en APA (*"genera el PDF APA"*, *"arma mi trabajo en formato APA"*, *"estructura este informe con norma APA"*, *"pasame esto a APA con portada y referencias"*). No se activa por el simple hecho de que exista un `.md`, ni cuando solo pides leer, resumir, traducir o corregir ortografía.
+The skill **activates by intent**: it is enough that you ask for an academic document assembled in APA (*"generate the APA PDF"*, *"armá mi trabajo en formato APA"*, *"estructura este informe con norma APA"*, *"pasame esto a APA con portada y referencias"*). It does not activate merely because a `.md` exists, nor when you only ask to read, summarize, translate or spell-check.
 
-### 1. Entrega los insumos
+### 1. Provide the inputs
 
-| # | Insumo | Para qué sirve | Obligatorio |
+| # | Input | What it is for | Mandatory |
 |---|--------|----------------|-------------|
-| 1 | El **`.md`** fuente | texto, encabezados, tablas en markdown, referencias y marcas de imagen `![]()` | sí |
-| 2 | Las **imágenes** referenciadas | se insertan en el documento (carpeta `images/` o archivos sueltos) | no |
-| 3 | Los **JSON de layout** (`*_content_list.json`, `*_content_list_v2.json`, `*_middle.json`, `*_model.json`) | tamaño y posición real de cada figura y ancho de tabla | no |
+| 1 | The source **`.md`** | text, headings, markdown tables, references and image markers `![]()` | yes |
+| 2 | The referenced **images** | inserted into the document (`images/` folder or loose files) | no |
+| 3 | The **layout JSON** (`*_content_list.json`, `*_content_list_v2.json`, `*_middle.json`, `*_model.json`) | real size and position of each figure and table width | no |
 
-El pipeline acepta tres grados de entrada:
+The pipeline accepts three levels of input:
 
-- `.md` solo → documento de texto, sin figuras ni índices de tablas/figuras.
-- `.md` + `images/` → figuras a tamaño fijo razonable.
-- `.md` + imágenes + JSON → figuras a su **tamaño real** (desde el `bbox`) y tablas a su ancho real de página.
+- `.md` only → text document, no figures and no lists of tables/figures.
+- `.md` + `images/` → figures at a reasonable fixed size.
+- `.md` + images + JSON → figures at their **real size** (from the `bbox`) and tables at their real page width.
 
-> Regla de oro: si falta algo imprescindible, la skill **te lo pide** antes de continuar. Nunca asume ni inventa contenido.
+> Golden rule: if something essential is missing, the skill **asks you** before continuing. It never assumes or invents content.
 
-### 2. Responde solo lo que falta
+### 2. Answer only what is missing
 
-De tus archivos saldrá casi todo. La skill te preguntará únicamente por los **datos que no aparezcan** en tus documentos: datos de portada (docente y su título/profesión, materia y su código, fecha), logo (opcional, solo si lo aportas), títulos/leyendas de tablas o figuras que no los traigan y, ante la duda, si el documento realmente no tiene tablas o figuras.
+Almost everything comes from your files. The skill will only ask you for the **data that does not appear** in your documents: cover data (instructor and their title/profession, course and its code, date), logo (optional, only if you provide it), table or figure titles/captions that do not come with one and, when in doubt, whether the document really has no tables or figures.
 
-**Regla dura:** mientras haya preguntas marcadas como bloqueantes, el documento **no se construye**. Nada se rellena con texto inventado ni se parchea el `.docx` a mano.
+**Hard rule:** while there are questions marked as blocking, the document **is not built**. Nothing is filled with invented text and the `.docx` is not patched by hand.
 
-### 3. Recibe los dos archivos
+### 3. Receive the two files
 
-`.docx` y `.pdf` verificados página por página, listos para entregar.
+`.docx` and `.pdf` verified page by page, ready to submit.
 
-## Flujo de trabajo
+## Workflow
 
-1. **Activación** — el usuario pide un documento académico en APA (por intención).
-2. **PASO 0 · Preflight** — `comprobar-entorno.ps1` verifica las herramientas. Si falta algo, `instalar-entorno.ps1` lo instala y re-verifica. Si no queda `ENTORNO OK`, se detiene y avisa.
-3. **Insumos** — se recibe el `.md` (obligatorio), las imágenes y los JSON de layout (opcionales).
-4. **Parser** — `md-a-manifiesto.py` convierte `.md` + JSON de layout en `MANIFEST.json`: enriquece, deduplica, separa palabras pegadas, calcula tamaños reales de imagen y aplica la nota por defecto. Deja las preguntas pendientes en `diagnostico`.
-5. **Preguntas obligatorias (PASO 0.5)** — si `pendientes_bloqueantes` no está vacío, se pregunta al usuario (datos de portada, títulos/leyendas faltantes, confirmación de "sin tablas/figuras") y no se construye hasta resolverlas. Las respuestas de portada se guardan en `portada.json` y se pasan al parser con `--portada`.
-6. **Construir el `.docx`** — `build-docx.js` lee `MANIFEST.json` y arma portada, TOC, índices, tablas, figuras y referencias. Aborta con código 4 si falta un título o leyenda.
-7. **Exportar a PDF** — `export-pdf.ps1` convierte `.docx → .pdf` con LibreOffice headless (copia temporal + perfil aislado por corrida).
-8. **Verificar** — `verificar-pdf.py` (con `pymupdf`) comprueba portada, índices con página correcta, leyendas, notas de tabla debajo, notas de figura encima de su imagen y sangría francesa en referencias. Si falla algo crítico, se corrige y se vuelve a exportar.
-9. **Entregar** — se entregan ambos archivos (`.docx` y `.pdf`).
+1. **Activation** — the user asks for an academic document in APA (by intent).
+2. **STEP 0 · Preflight** — `comprobar-entorno.ps1` checks the tools. If something is missing, `instalar-entorno.ps1` installs it and re-checks. If it does not return `RESULT: OK`, it stops and warns.
+3. **Inputs** — the `.md` (mandatory), the images and the layout JSON (optional) are received.
+4. **Parser** — `md-a-manifiesto.py` turns `.md` + layout JSON into `MANIFEST.json`: it enriches, deduplicates, splits glued words, computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
+5. **Mandatory questions (STEP 0.5)** — if `pendientes_bloqueantes` is not empty, the user is asked (cover data, missing titles/captions, "no tables/figures" confirmation) and nothing is built until they are resolved. The cover answers are saved in `portada.json` and passed to the parser with `--portada`.
+6. **Build the `.docx`** — `build-docx.js` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references. Aborts with code 4 if a title or caption is missing.
+7. **Export to PDF** — `export-pdf.ps1` converts `.docx → .pdf` with headless LibreOffice (temporary copy + isolated profile per run).
+8. **Verify** — `verificar-pdf.py` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes above their image and hanging indent in references. If a critical check fails, it is fixed and exported again.
+9. **Deliver** — both files are delivered (`.docx` and `.pdf`).
 
 ```
-Activación
-   └─ PASO 0  Preflight del entorno ──► (falta algo) instalar-entorno.ps1 ──► re-verificar
-        └─ Insumos: .md (+ imágenes + JSON de layout)
+Activation
+   └─ STEP 0  Environment preflight ──► (something missing) instalar-entorno.ps1 ──► re-check
+        └─ Inputs: .md (+ images + layout JSON)
              └─ md-a-manifiesto.py ──► MANIFEST.json (+ diagnostico)
-                  └─ PASO 0.5  ¿pendientes bloqueantes? ──► (sí) preguntar al usuario
-                       └─ build-docx.js ──► documento.docx
-                            └─ export-pdf.ps1 (LibreOffice headless) ──► documento.pdf
-                                 └─ verificar-pdf.py ──► (fallas) corregir ──► re-exportar
-                                      └─ Entrega: .docx + .pdf
+                  └─ STEP 0.5  Blocking pending questions? ──► (yes) ask the user
+                       └─ build-docx.js ──► document.docx
+                            └─ export-pdf.ps1 (headless LibreOffice) ──► document.pdf
+                                 └─ verificar-pdf.py ──► (failures) fix ──► re-export
+                                      └─ Delivery: .docx + .pdf
 ```
 
-## Cómo funciona por dentro
+## How it works inside
 
-- **Tamaño de imágenes sin estimar a ojo:** el parser lee el `bbox` de cada figura en el JSON de layout (normalizado a 0..1000), conserva su proporción real y acota el ancho al contenido útil.
-- **Prosa y orden salen del `.md`**, no del JSON: los JSON enriquecen el ancho de las tablas y el tamaño de las figuras, pero no reescriben el texto.
-- **TOC funcional de verdad:** las entradas usan campos `PAGEREF` sobre *bookmarks*, así el número de página se recalcula al abrir el documento. LibreOffice no resuelve campos `SEQ`, por eso la numeración de tablas y figuras es literal.
-- **Tablas renderizables en LibreOffice:** ancho explícito (`width` + `columnWidths` + `layout: FIXED`) y bordes solo horizontales; sin esto, LibreOffice no las muestra (bug conocido).
-- **Orientación automática por tabla:** una tabla que no cabe en vertical (6 o más columnas, o celdas muy largas) se pasa sola a una **página horizontal** con su título y su nota; después el texto vuelve a vertical. El criterio es legibilidad, no el número de filas.
-- **Nota de figura encima de la imagen; nota de tabla debajo de la tabla** (APA 7 las distingue por posición, no solo por texto).
-- **Exportación limpia:** `soffice.com` (no `soffice.exe`), perfil aislado de LibreOffice por corrida y copia temporal; el mensaje `Could not find platform independent libraries <prefix>` por stderr es benigno y se ignora.
-- **Nada de listas blancas incrustadas:** los términos que el deglue no debe separar viven solo en `references/terminos-whitelist.txt`.
+- **Image size without guessing by eye:** the parser reads each figure's `bbox` in the layout JSON (normalized to 0..1000), keeps its real proportion and clamps the width to the usable content width.
+- **Prose and order come from the `.md`**, not the JSON: the JSON files enrich the table width and the figure size, but do not rewrite the text.
+- **Genuinely functional TOC:** the entries use `PAGEREF` fields over *bookmarks*, so the page number is recalculated when the document is opened. LibreOffice does not resolve `SEQ` fields, which is why table and figure numbering is literal.
+- **Tables renderable in LibreOffice:** explicit width (`width` + `columnWidths` + `layout: FIXED`) and horizontal-only borders; without this, LibreOffice does not show them (known bug).
+- **Automatic per-table orientation:** a table that does not fit in portrait (6 or more columns, or very long cells) moves on its own to a **landscape page** with its title and note; afterwards the text returns to portrait. The criterion is legibility, not the number of rows.
+- **Figure note above the image; table note below the table** (APA 7 distinguishes them by position, not only by text).
+- **Clean export:** the resolved `soffice` binary is invoked directly (not via `Start-Process`), with an isolated LibreOffice profile per run and a temporary copy; the `Could not find platform independent libraries <prefix>` message on stderr is benign and ignored.
+- **No embedded whitelists:** the terms the deglue must not split live only in `references/terms-whitelist.txt`.
 
-## Estructura del repositorio
+## Repository structure
 
 ```
 Generator-APA7/
 ├── README.md
 └── generar-pdf-apa/
-    ├── SKILL.md                          # definición de la skill (activación, flujo, reglas)
-    ├── .gitignore                        # excluye estado generado (.work, __pycache__)
+    ├── SKILL.md                          # skill definition (activation, workflow, rules)
+    ├── .gitignore                        # excludes generated state (.work, __pycache__)
     ├── references/
-    │   ├── normas-apa7.md                # reglas de formato APA 7
-    │   ├── portada-institucional.md      # layout de la portada en 3 zonas
-    │   ├── campos-word-toc.md            # TOC/índices funcionales y trampas de docx/LibreOffice
-    │   ├── requisitos-sistema.md         # herramientas, preflight y resolución de rutas
-    │   └── terminos-whitelist.txt        # términos intocables para el deglue
+    │   ├── apa7-format.md                # APA 7 formatting rules
+    │   ├── institutional-cover.md        # 3-zone cover layout
+    │   ├── word-toc-fields.md            # functional TOC/indices and docx/LibreOffice pitfalls
+    │   ├── system-requirements.md        # tools, preflight and path resolution
+    │   └── terms-whitelist.txt           # untouchable terms for the deglue
     ├── scripts/
-    │   ├── comprobar-entorno.ps1         # preflight del entorno (PASO 0)
-    │   ├── instalar-entorno.ps1          # autoinstalación de lo faltante
+    │   ├── comprobar-entorno.ps1         # environment preflight (STEP 0)
+    │   ├── instalar-entorno.ps1          # auto-install of what is missing
     │   ├── md-a-manifiesto.py            # .md + JSON → MANIFEST.json
     │   ├── build-docx.js                 # MANIFEST.json → .docx
-    │   ├── export-pdf.ps1                # .docx → .pdf con LibreOffice
-    │   ├── verificar-pdf.py              # verificación del .pdf (pymupdf)
-    │   ├── calcular_tamano_imagenes.py   # tamaño real de imágenes desde los JSON de layout
+    │   ├── export-pdf.ps1                # .docx → .pdf with LibreOffice
+    │   ├── verificar-pdf.py              # .pdf verification (pymupdf)
     │   └── lib/
-    │       └── rutas.ps1                 # resolución portable de rutas y herramientas
-    └── .work/                            # estado generado (node_modules de docx)
+    │       └── rutas.ps1                 # portable path and tool resolution
+    └── .work/                            # generated state (docx's node_modules)
 ```
 
-## Limitaciones
+## Limitations
 
-- **Windows / PowerShell 5.1+** (los scripts están pensados para este entorno).
-- No convierte directamente de PDF a Word: parte de un `.md` ya extraído por MinerU o Docling. Los JSON de layout son opcionales, pero sin ellos las figuras no conservan su tamaño real.
-- Formato **APA 7 carta con márgenes 1 in**, sin reglas institucionales adicionales.
-- La portada no lleva número de página visible; la numeración arranca en la página 2.
+- **Windows / PowerShell 5.1+** (the scripts are designed for this environment).
+- It does not convert directly from PDF to Word: it starts from a `.md` already extracted by MinerU or Docling. The layout JSON is optional, but without it the figures do not keep their real size.
+- **APA 7 letter format with 1 in margins**, with no extra institutional rules.
+- The cover page carries no visible page number; numbering starts on page 2.
 
 ---
 
-*Skill `generar-pdf-apa` — documento académico APA 7 (.docx + PDF) sin depender de Microsoft Word.*
+*Skill `generar-pdf-apa` — APA 7 academic document (.docx + PDF) without depending on Microsoft Word.*

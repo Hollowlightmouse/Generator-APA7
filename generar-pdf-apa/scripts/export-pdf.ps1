@@ -1,26 +1,27 @@
 <#
-    export-pdf.ps1 - Convierte el .docx en PDF con LibreOffice (motor unico).
+    export-pdf.ps1 - Converts the .docx into PDF with LibreOffice (single engine).
 
-    No contiene rutas absolutas: todo se descubre con lib\rutas.ps1 a partir de
+    Contains no absolute paths: everything is discovered with lib\rutas.ps1 from
     $PSScriptRoot.
 
-    Puntos que importan y que ya se comprobaron en este equipo:
-      * Se usa un perfil de usuario AISLADO de LibreOffice (-env:UserInstallation).
-        Si se usa el perfil real, un LibreOffice ya abierto (por ejemplo desde
-        la interfaz) hace que la conversion se quede colgada en silencio.
-      * Se invoca soffice.com, no soffice.exe. El .exe es un lanzador que
-        devuelve el control antes de terminar y su stderr rompe la redireccion
-        en PowerShell; el .com es la consola y espera de verdad.
-      * Si hay un proceso LibreOffice huérfano de una conversion anterior, se
-        limpia antes de exportar. Sin esto, el segundo --convert-to falla.
+    Points that matter and were already verified on this machine:
+      * An ISOLATED LibreOffice user profile is used (-env:UserInstallation). If
+        the real profile is used, an already-open LibreOffice (e.g. from the GUI)
+        makes the conversion hang silently.
+      * soffice.com is invoked, not soffice.exe. The .exe is a launcher that
+        returns control before finishing and its stderr breaks PowerShell's
+        redirection; the .com is the console and truly waits.
+      * If there is an orphan LibreOffice process from a previous conversion, it
+        is cleaned up before exporting. Without this, the second --convert-to
+        fails.
 
-    Parametros:
-      -Docx    <ruta>   .docx de entrada   (obligatorio)
-      -OutDir  <ruta>   carpeta de salida  (por defecto, la del .docx)
-      -Log     <ruta>   fichero de log     (por defecto <OutDir>\_logs\03-export.log)
-      -Timeout <seg>    tiempo maximo de espera (por defecto 300)
+    Parameters:
+      -Docx    <path>   input .docx        (mandatory)
+      -OutDir  <path>   output folder      (default: the .docx folder)
+      -Log     <path>   log file           (default <OutDir>\_logs\03-export.log)
+      -Timeout <sec>    maximum wait time  (default 300)
 
-    Devuelve 0 si el PDF se genero, 1 si no.
+    Returns 0 if the PDF was produced, 1 if not.
 #>
 
 [CmdletBinding()]
@@ -48,7 +49,7 @@ try {
 
     $docxAbs = (Resolve-Path -LiteralPath $Docx -ErrorAction SilentlyContinue)
     if (-not $docxAbs) {
-        Write-Log "No existe el .docx: $Docx" 'FALLA'
+        Write-Log "The .docx does not exist: $Docx" 'FAIL'
         exit 1
     }
     $docxAbs = $docxAbs.Path
@@ -65,85 +66,85 @@ try {
 
     $expected = Join-Path $OutDir ((Get-Item -LiteralPath $docxAbs).BaseName + '.pdf')
 
-    Write-Log '=== FASE 3: exportacion a PDF con LibreOffice ==='
-    Write-Log "Raiz de la skill : $raiz"
-    Write-Log "Workdir          : $work"
-    Write-Log "Entrada (.docx)  : $docxAbs"
-    Write-Log "Salida esperada  : $expected"
+    Write-Log '=== PHASE 3: export to PDF with LibreOffice ==='
+    Write-Log "Skill root      : $raiz"
+    Write-Log "Workdir         : $work"
+    Write-Log "Input (.docx)   : $docxAbs"
+    Write-Log "Expected output : $expected"
 
     $consola = Get-SofficeConsolePath
     if (-not $consola) {
-        Write-Log 'LibreOffice no esta instalado. Ejecute scripts\instalar-entorno.ps1' 'FALLA'
+        Write-Log 'LibreOffice is not installed. Run scripts\instalar-entorno.ps1' 'FAIL'
         exit 1
     }
-    Write-Log "LibreOffice      : $consola (consola; .exe colgaria el script)"
+    Write-Log "LibreOffice     : $consola (console; .exe would hang the script)"
 
-    # Limpiar procesos huerfanos de conversiones anteriores: si queda uno vivo,
-    # el --convert-to siguiente se queda colgado sin decir por que.
+    # Clean up orphan processes from previous conversions: if one stays alive,
+    # the next --convert-to hangs without saying why.
     $huerfanos = Get-Process -Name 'soffice', 'soffice.bin' -ErrorAction SilentlyContinue
     if ($huerfanos) {
-        Write-Log ("Limpando {0} proceso(s) LibreOffice previo(s)" -f $huerfanos.Count)
-        Stop-ProcessTree -Ids $huerfanos.Id -Force -ErrorAction SilentlyContinue
+        Write-Log ("Cleaning up {0} leftover LibreOffice process(es)" -f $huerfanos.Count)
+        Stop-ProcessTree -Ids $huerfanos.Id
         Start-Sleep -Seconds 2
     }
 
     if (Test-Path -LiteralPath $expected) { Remove-Item -LiteralPath $expected -Force }
 
-    # Invoke-Soffice ya anade --headless --norestore --nolockcheck y un perfil
-    # de usuario AISLADO. Aqui solo se pasan los argumentos de la conversion.
+    # Invoke-Soffice already adds --headless --norestore --nolockcheck and an
+    # ISOLATED user profile. Here only the conversion arguments are passed.
     $loArgs = @('--convert-to', 'pdf:writer_pdf_Export', '--outdir', $OutDir, $docxAbs)
 
-    Write-Log ("Ejecutando: soffice.com {0}" -f ($loArgs -join ' '))
+    Write-Log ("Running: soffice.com {0}" -f ($loArgs -join ' '))
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $r = Invoke-Soffice -Arguments $loArgs -TimeoutSeconds $Timeout -LogDir $logDir
     $sw.Stop()
 
-    Write-Log ("soffice terminó con codigo {0} en {1:N1} s" -f $r.ExitCode, $sw.Elapsed.TotalSeconds)
+    Write-Log ("soffice finished with code {0} in {1:N1} s" -f $r.ExitCode, $sw.Elapsed.TotalSeconds)
     if ($r.StdOut) { Write-Log ("stdout: " + ($r.StdOut -replace '\s+', ' ').Trim()) }
     if ($r.StdErr) {
         $reales = @(Test-SofficeStderrIsBenign -Stderr $r.StdErr)
         if ($reales.Count -eq 0) {
-            Write-Log 'stderr: solo ruido benigno de LibreOffice (ignorado)'
+            Write-Log 'stderr: only benign LibreOffice noise (ignored)'
         } else {
-            Write-Log ("stderr con {0} linea(s) real(es):" -f $reales.Count) 'AVISO'
-            foreach ($l in $reales) { Write-Log ("  " + $l) 'AVISO' }
+            Write-Log ("stderr with {0} real line(s):" -f $reales.Count) 'WARN'
+            foreach ($l in $reales) { Write-Log ("  " + $l) 'WARN' }
         }
     }
-    if ($r.LogDir) { Write-Log ("Traza de LibreOffice en: {0}" -f $r.LogDir) }
+    if ($r.LogDir) { Write-Log ("LibreOffice trace in: {0}" -f $r.LogDir) }
     if (-not (Test-Path -LiteralPath $expected)) {
-        Write-Log "No se produjo el PDF esperado: $expected" 'FALLA'
+        Write-Log "The expected PDF was not produced: $expected" 'FAIL'
         exit 1
     }
 
     $pdf = Get-Item -LiteralPath $expected
-    Write-Log ("PDF generado: {0} ({1:N0} bytes)" -f $pdf.FullName, $pdf.Length)
-    Write-Log 'RESULTADO: OK'
+    Write-Log ("PDF generated: {0} ({1:N0} bytes)" -f $pdf.FullName, $pdf.Length)
+    Write-Log 'RESULT: OK'
     $code = 0
 }
 catch {
-    Write-Log ("Error inesperado: " + $_.Exception.Message) 'FALLA'
+    Write-Log ("Unexpected error: " + $_.Exception.Message) 'FAIL'
     $code = 1
 }
 finally {
     Get-Process -Name 'soffice', 'soffice.bin' -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
 
-    # El perfil aislado de LibreOffice solo sirve durante la conversion: son
-    # miles de archivos y, si se deja, se acumulan miles de directorios por
-    # corrida. Se borra siempre (tambien en error) y se conservan los .log,
-    # que si son la diagnostica util.
+    # The isolated LibreOffice profile is only useful during the conversion: it
+    # is thousands of files and, if left behind, thousands of directories pile up
+    # per run. It is always deleted (also on error) and the .log files, which are
+    # the useful diagnostics, are kept.
     if ($r -and $r.ProfilePath -and (Test-Path -LiteralPath $r.ProfilePath)) {
         try {
             Remove-Item -LiteralPath $r.ProfilePath -Recurse -Force -ErrorAction Stop
-            Write-Log ("Perfil temporal de LibreOffice eliminado: {0}" -f $r.ProfilePath)
+            Write-Log ("Temporary LibreOffice profile deleted: {0}" -f $r.ProfilePath)
         } catch {
-            Write-Log ("No se pudo borrar el perfil temporal {0}: {1}" -f $r.ProfilePath, $_.Exception.Message) 'AVISO'
+            Write-Log ("Could not delete the temporary profile {0}: {1}" -f $r.ProfilePath, $_.Exception.Message) 'WARN'
         }
     }
 
     if ($Log) {
         Set-Content -LiteralPath $Log -Value ($logLines -join "`n") -Encoding UTF8
-        Write-Host ("Log escrito: {0}" -f $Log)
+        Write-Host ("Log written: {0}" -f $Log)
     }
 }
 

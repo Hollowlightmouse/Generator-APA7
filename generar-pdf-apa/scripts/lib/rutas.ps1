@@ -1,27 +1,27 @@
-# lib/rutas.ps1 - Descubrimiento de rutas de la skill generar-pdf-apa
+# lib/rutas.ps1 - Path discovery for the generar-pdf-apa skill
 #
-# REGLA DE ORO: este archivo NO contiene NINGUNA ruta absoluta de una maquina
-# concreta. Todo se resuelve en tiempo de ejecucion a partir de:
-#   1) Variables de entorno (permiten sobrescribir sin editar la skill)
-#   2) La propia ubicacion de la skill ($PSScriptRoot)
-#   3) El PATH del sistema
-#   4) Rutas por defecto de cada sistema operativo (Windows / macOS / Linux)
+# GOLDEN RULE: this file contains NO absolute path of any specific machine.
+# Everything is resolved at runtime from:
+#   1) Environment variables (let you override without editing the skill)
+#   2) The skill's own location ($PSScriptRoot)
+#   3) The system PATH
+#   4) Default locations of each operating system (Windows / macOS / Linux)
 #
-# Variables de entorno soportadas (todas opcionales):
-#   APA7_SOFFICE  ruta al ejecutable de LibreOffice
-#   APA7_PYTHON   ruta al interprete Python que tiene pymupdf instalado
-#   APA7_WORKDIR  directorio de trabajo (donde vive node_modules/docx)
-#   APA7_NODEDIR  directorio que contiene node_modules/docx
+# Supported environment variables (all optional):
+#   APA7_SOFFICE  path to the LibreOffice executable
+#   APA7_PYTHON   path to the Python interpreter that has pymupdf installed
+#   APA7_WORKDIR  working directory (where node_modules/docx lives)
+#   APA7_NODEDIR  directory that contains node_modules/docx
 #
-# Uso:  . "<ruta>\scripts\lib\rutas.ps1"
+# Usage:  . "<path>\scripts\lib\rutas.ps1"
 #
-# NOTA: este archivo NO activa Set-StrictMode a proposito. Al hacer dot-source
-# contaminaria el ambito del script que lo carga y abortaria con errores como
-# "no se puede recuperar $IsMacOS" en PowerShell 5.1, donde esa variable no
-# existe. La deteccion de plataforma usa Test-Path y Get-Variable.
+# NOTE: this file does NOT enable Set-StrictMode on purpose. Dot-sourcing it
+# would pollute the scope of the loading script and abort with errors such as
+# "cannot retrieve $IsMacOS" on PowerShell 5.1, where that variable does not
+# exist. Platform detection uses Test-Path and Get-Variable.
 
 # ---------------------------------------------------------------------------
-# Deteccion de plataforma (compatible con PowerShell 5.1 y 7+)
+# Platform detection (compatible with PowerShell 5.1 and 7+)
 # ---------------------------------------------------------------------------
 function Test-Apa7IsMac {
     $v = Get-Variable -Name 'IsMacOS' -ErrorAction SilentlyContinue
@@ -38,26 +38,26 @@ function Test-Apa7IsWindows {
 }
 
 # ---------------------------------------------------------------------------
-# Raiz de la skill: dos niveles arriba desde scripts/lib
+# Skill root: two levels up from scripts/lib
 # ---------------------------------------------------------------------------
 $script:APA7_SKILL_ROOT = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
 function Get-SkillRoot {
-    <#  Raiz de la carpeta de la skill.  #>
+    <#  Root folder of the skill.  #>
     return $script:APA7_SKILL_ROOT
 }
 
 function Get-SkillScript {
-    <#  Ruta absoluta de un script de scripts\.  #>
+    <#  Absolute path of a script inside scripts\.  #>
     param([Parameter(Mandatory = $true)][string]$Name)
     $p = Join-Path $script:APA7_SKILL_ROOT "scripts\$Name"
-    if (-not (Test-Path -LiteralPath $p)) { throw "Script no encontrado: $p" }
+    if (-not (Test-Path -LiteralPath $p)) { throw "Script not found: $p" }
     return $p
 }
 
 # ---------------------------------------------------------------------------
-# Directorio de trabajo: dentro de la skill, para que require('docx') resuelva
-# sin depender del directorio actual (bug corregido del pipeline anterior).
+# Working directory: inside the skill, so that require('docx') resolves without
+# depending on the current directory (bug fixed from the previous pipeline).
 # ---------------------------------------------------------------------------
 function Get-WorkDir {
     if ($env:APA7_WORKDIR) { return $env:APA7_WORKDIR }
@@ -69,13 +69,13 @@ function Get-WorkDir {
 }
 
 function Get-NodeDir {
-    <#  Directorio que DEBE contener node_modules\docx.  #>
+    <#  Directory that MUST contain node_modules\docx.  #>
     if ($env:APA7_NODEDIR) { return $env:APA7_NODEDIR }
     return (Get-WorkDir)
 }
 
 function Get-LogDir {
-    <#  Carpeta de logs de una corrida. Se crea si no existe.  #>
+    <#  Log folder of a run. Created if missing.  #>
     param([string]$ForRun)
     if (-not $ForRun) { $ForRun = [IO.Path]::GetTempPath() }
     if (-not (Test-Path -LiteralPath $ForRun)) {
@@ -85,7 +85,7 @@ function Get-LogDir {
 }
 
 # ---------------------------------------------------------------------------
-# LibreOffice: entorno -> PATH -> rutas tipicas de cada SO
+# LibreOffice: environment -> PATH -> typical paths per OS
 # ---------------------------------------------------------------------------
 function Get-SofficeCandidates {
     $c = New-Object System.Collections.Generic.List[string]
@@ -115,8 +115,8 @@ function Get-SofficeCandidates {
 
 function Get-SofficePath {
     <#
-        Devuelve la ruta de LibreOffice encontrada, o $null.
-        No lanza excepcion: el preflight decide si es un error fatal.
+        Returns the path of the LibreOffice executable found, or $null.
+        It does not throw: the preflight decides whether it is a fatal error.
     #>
     foreach ($p in (Get-SofficeCandidates)) {
         if ($p -and (Test-Path -LiteralPath $p)) { return $p }
@@ -126,16 +126,16 @@ function Get-SofficePath {
 
 function Get-SofficeConsolePath {
     <#
-        En Windows devuelve el lanzador CONSOLA de LibreOffice (soffice.com)
-        si existe. Es OBLIGATORIO usarlo en lugar de soffice.exe:
+        On Windows returns the CONSOLE launcher of LibreOffice (soffice.com)
+        if it exists. It is MANDATORY to use it instead of soffice.exe:
 
-        soffice.exe se desprende, el proceso hijo hereda el handle del pipe de
-        salida y PowerShell se queda esperando para siempre. Eso cuelga el
-        script (y el terminal entero). Con soffice.com + Start-Process con
-        redireccion a fichero, el proceso termina solo y devuelve el codigo.
+        soffice.exe detaches, the child process inherits the output pipe handle
+        and PowerShell waits forever. That hangs the script (and the whole
+        terminal). With soffice.com + Start-Process redirecting to a file, the
+        process finishes on its own and returns the code.
 
-        En macOS/Linux se devuelve la misma ruta que Get-SofficePath (el
-        ejecutable unix si esta bien comportado con &).
+        On macOS/Linux it returns the same path as Get-SofficePath (the unix
+        executable, assuming it behaves well with &).
     #>
     $exe = Get-SofficePath
     if (-not $exe) { return $null }
@@ -148,24 +148,24 @@ function Get-SofficeConsolePath {
 
 function Invoke-Soffice {
     <#
-        Ejecuta LibreOffice de forma CONFIABLE y acotada en tiempo.
+        Runs LibreOffice RELIABLY and bounded in time.
 
-        Devuelve @{ ExitCode; StdOut; StdErr; TimedOut }
+        Returns @{ ExitCode; StdOut; StdErr; TimedOut }
 
-        Por que NO se usa `& soffice.exe`:
-          En Windows soffice.exe se desprende, el hijo (soffice.bin) hereda el
-          handle del pipe y PowerShell se queda leyendo para siempre: cuelga el
-          script entero. Se usa el lanzador de consola soffice.com.
+        Why NOT `& soffice.exe`:
+          On Windows soffice.exe detaches, the child (soffice.bin) inherits the
+          pipe handle and PowerShell keeps reading forever: it hangs the whole
+          script. The console launcher soffice.com is used instead.
 
-        Por que la salida va a FICHEROS y no a pipes:
-          Con RedirectStandardOutput de .NET el proceso de LibreOffice no
-          termina (ExitCode 124 / timeout) porque los streams quedan abiertos
-          por el proceso hijo. Redirigiendo a fichero con Start-Process y
-          sondeando HasExited, el fichero esta volcado en cuanto el proceso
-          termina y se leen los dos streams con normalidad.
+        Why the output goes to FILES and not to pipes:
+          With .NET RedirectStandardOutput the LibreOffice process does not
+          finish (ExitCode 124 / timeout) because the streams stay open in the
+          child process. By redirecting to a file with Start-Process and polling
+          HasExited, the file is flushed as soon as the process ends and both
+          streams are read normally.
 
-        Nunca redirigir con 2>&1 | Out-File junto a $ErrorActionPreference='Stop':
-        PowerShell lanza NativeCommandError y aborta.
+        Never redirect with 2>&1 | Out-File next to $ErrorActionPreference='Stop':
+        PowerShell throws NativeCommandError and aborts.
     #>
     param(
         [string[]]$Arguments = @(),
@@ -173,26 +173,33 @@ function Invoke-Soffice {
         [string]$LogDir
     )
     $bin = Get-SofficeConsolePath
-    if (-not $bin) { throw 'LibreOffice no encontrado. Defina APA7_SOFFICE o ejecute instalar-entorno.ps1.' }
+    if (-not $bin) { throw 'LibreOffice not found. Set APA7_SOFFICE or run instalar-entorno.ps1.' }
 
-    $stamp = [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    # Si el llamador no da -LogDir creamos un directorio temporal propio. Hay que
-    # borrarlo antes de salir: si no, cada comprobacion del preflight deja un
-    # apa7-lo-<pid> huerfano en TEMP (se acumulan indefinidamente).
+    # If the caller does not pass -LogDir we create our own temporary directory.
+    # It must be deleted before returning: otherwise every preflight check leaves
+    # an orphan apa7-lo-<pid> folder in TEMP (they accumulate indefinitely).
     $runDirTemporal = -not $LogDir
     $runDir = if ($LogDir) { $LogDir } else { Join-Path ([IO.Path]::GetTempPath()) ('apa7-lo-' + $PID) }
     if (-not (Test-Path -LiteralPath $runDir)) { New-Item -ItemType Directory -Path $runDir -Force | Out-Null }
-    $errFile = Join-Path $runDir "lo-$stamp.err.log"
-    $outFile = Join-Path $runDir "lo-$stamp.out.log"
-    $profile = Join-Path $runDir "lo_profile_$stamp"
+
+    # FIXED names: a run overwrites the previous one instead of leaving a new
+    # pair of files behind (the old random stamp piled up one pair per call).
+    # Any leftovers from a crashed run are removed first.
+    $errFile = Join-Path $runDir 'lo.err.log'
+    $outFile = Join-Path $runDir 'lo.out.log'
+    $profile = Join-Path $runDir 'lo_profile'
+    Remove-Item -LiteralPath $errFile, $outFile -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $profile) {
+        Remove-Item -LiteralPath $profile -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
     $args = @('--headless', '--norestore', '--nolockcheck', '--nofirststartwizard',
         ('-env:UserInstallation=' + (ConvertTo-Apa7FileUri $profile))) + $Arguments
 
-    # Captura con `&`: stdout por asignacion, stderr a fichero. NO usar
-    # 2>&1 | Out-File (lanza NativeCommandError con ErrorActionPreference Stop)
-    # ni Start-Process: si el proceso padre ya redirige su salida, la
-    # redireccion anidada deja a LibreOffice sin terminar nunca.
+    # Capture with `&`: stdout by assignment, stderr to a file. Do NOT use
+    # 2>&1 | Out-File (throws NativeCommandError with ErrorActionPreference Stop)
+    # nor Start-Process: if the parent process already redirects its output, the
+    # nested redirection keeps LibreOffice from ever finishing.
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $out = & $bin @args 2> $errFile
@@ -202,7 +209,7 @@ function Invoke-Soffice {
     $outText = (($out | ForEach-Object { [string]$_ }) -join "`n")
     Set-Content -LiteralPath $outFile -Value $outText -Encoding UTF8 -ErrorAction SilentlyContinue
 
-    $resultado = @{
+    $result = @{
         ExitCode   = $code
         StdOut     = $outText
         StdErr     = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
@@ -213,17 +220,17 @@ function Invoke-Soffice {
         ProfilePath = $profile
     }
 
-    # Ya leimos todo lo que necesitabamos. Si el directorio es nuestro (temporal),
-    # se borra aqui para no dejar basura en TEMP.
+    # We already read everything we needed. If the directory is ours (temporary),
+    # it is deleted here so we do not leave garbage in TEMP.
     if ($runDirTemporal) {
         Remove-Item -LiteralPath $runDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    return $resultado
+    return $result
 }
 
 function ConvertTo-Apa7FileUri {
-    <#  Convierte una ruta local en URI file:/// para -env:UserInstallation.  #>
+    <#  Turns a local path into a file:/// URI for -env:UserInstallation.  #>
     param([Parameter(Mandatory = $true)][string]$Path)
     $full = [IO.Path]::GetFullPath($Path).Replace('\', '/')
     if (-not $full.StartsWith('/')) { $full = '/' + $full }
@@ -231,7 +238,7 @@ function ConvertTo-Apa7FileUri {
 }
 
 function ConvertTo-Apa7Arg {
-    <#  Entrecomilla un argumento para la linea de comandos de Windows.  #>
+    <#  Quotes an argument for the Windows command line.  #>
     param([string]$Value)
     if ($null -eq $Value) { return '""' }
     if ($Value -notmatch '[\s"]') { return $Value }
@@ -241,30 +248,38 @@ function ConvertTo-Apa7Arg {
 }
 
 function Stop-ProcessTree {
-    <#  Mata un proceso y sus hijos (soffice -> soffice.bin).  #>
-    param([Parameter(Mandatory = $true)][int]$Id)
-    if (Test-Apa7IsWindows) {
-        $tk = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-        if (Test-Path -LiteralPath $tk) {
-            try { & $tk /PID $Id /T /F | Out-Null; return } catch { }
+    <#
+        Kills one or more processes and their children (soffice -> soffice.bin).
+        Accepts an array ($huerfanos.Id returns one), which is how export-pdf.ps1
+        calls it. The old single [int]$Id signature rejected the array and the
+        call silently failed.
+    #>
+    param([Parameter(Mandatory = $true)][int[]]$Ids)
+    foreach ($Id in $Ids) {
+        if (-not $Id) { continue }
+        if (Test-Apa7IsWindows) {
+            $tk = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+            if (Test-Path -LiteralPath $tk) {
+                try { & $tk /PID $Id /T /F | Out-Null; continue } catch { }
+            }
         }
+        try { Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue } catch { }
     }
-    try { Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue } catch { }
 }
 
 function Test-SofficeStderrIsBenign {
     <#
-        Filtra el ruido conocido de LibreOffice headless y devuelve SOLO las
-        lineas que merecen atención (array vacio = todo el stderr era ruido).
+        Filters the known LibreOffice headless noise and returns ONLY the lines
+        that deserve attention (empty array = all stderr was noise).
 
-        Se descartan:
-          * "Could not find platform independent libraries <prefix>": aparece
-            cuando el proceso hereda PYTHONHOME/PYTHONPATH. No afecta a la
-            conversion.
-          * "Warning: failed to launch javaldx", avisos de libpng.
-          * El envoltorio que PowerShell anade al redirigir stderr
-            (CategoryInfo / FullyQualifiedErrorId / RemoteException), que no es
-            salida del proceso sino de PowerShell.
+        Discarded:
+          * "Could not find platform independent libraries <prefix>": appears
+            when the process inherits PYTHONHOME/PYTHONPATH. It does not affect
+            the conversion.
+          * "Warning: failed to launch javaldx", libpng warnings.
+          * The wrapper PowerShell adds when redirecting stderr
+            (CategoryInfo / FullyQualifiedErrorId / RemoteException), which is
+            not process output but PowerShell's.
     #>
     param([string]$Stderr)
     if (-not $Stderr) { return @() }
@@ -275,24 +290,24 @@ function Test-SofficeStderrIsBenign {
         if ($l -match 'Could not find platform independent libraries') { continue }
         if ($l -match 'Warning: failed to launch javaldx') { continue }
         if ($l -match 'libpng warning') { continue }
-        # envoltorio de PowerShell, no del proceso
+        # PowerShell wrapper, not the process
         if ($l -match 'CategoryInfo|FullyQualifiedErrorId|RemoteException') { continue }
         if ($l -match '^\+|^soffice(\.exe|\.com)?\s*:') { continue }
-        if ($l -match '\.ps1:\s*\d+\s+Car') { continue }   # "En <script>.ps1:194 Caracter 12"
+        if ($l -match '\.ps1:\s*\d+\s+Car') { continue }   # "At <script>.ps1:194 char: 12"
         $real += $l
     }
     return $real
 }
 
 # ---------------------------------------------------------------------------
-# Python con pymupdf: entorno -> candidatos explicitos -> PATH
+# Python with pymupdf: environment -> explicit candidates -> PATH
 # ---------------------------------------------------------------------------
 function Get-PythonCandidates {
     $c = New-Object System.Collections.Generic.List[string]
 
     if ($env:APA7_PYTHON) { $c.Add($env:APA7_PYTHON) }
 
-    # venv con nombre convention dentro o cerca de la skill
+    # venv with conventional name inside or near the skill
     $root = $script:APA7_SKILL_ROOT
     if (Test-Apa7IsMac) {
         $pyNames = @('python3', 'python')
@@ -308,26 +323,68 @@ function Get-PythonCandidates {
     $cmd2 = Get-Command 'python' -ErrorAction SilentlyContinue
     if ($cmd2) { $c.Add($cmd2.Source) }
 
+    if (-not (Test-Apa7IsMac)) {
+        # Typical install locations when Python is not on PATH.
+        $patterns = @()
+        if ($env:LOCALAPPDATA) { $patterns += (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python*\python.exe') }
+        if (${env:ProgramFiles}) { $patterns += (Join-Path ${env:ProgramFiles} 'Python*\python.exe') }
+        foreach ($pat in $patterns) {
+            foreach ($p in (Get-ChildItem -Path $pat -ErrorAction SilentlyContinue)) {
+                $c.Add($p.FullName)
+            }
+        }
+        # The py launcher is tried LAST: it still works when a Microsoft Store
+        # stub shadows python.exe on PATH.
+        $py = Get-Command 'py' -ErrorAction SilentlyContinue
+        if ($py) { $c.Add($py.Source) }
+    }
+
     return $c
+}
+
+function Test-Apa7PythonWorks {
+    <#
+        True only if the path is a WORKING Python interpreter (it prints its
+        version). The Microsoft Store stub lives under \WindowsApps\ and exists
+        but is not a real interpreter, so it is rejected by path and, as a
+        belt-and-suspenders, by actually running it.
+    #>
+    param([Parameter(Mandatory = $true)][string]$File)
+    if (-not $File) { return $false }
+    if ($File -match '\\WindowsApps\\') { return $false }
+    if (-not (Test-Path -LiteralPath $File)) { return $false }
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $File '-c' 'import sys; print(sys.version.split()[0])' 2>$null
+        $code = $LASTEXITCODE
+    } catch {
+        $code = 1; $out = @()
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($code -ne 0) { return $false }
+    return [bool]($out | Where-Object { $_ })
 }
 
 function Get-PythonPath {
     <#
-        Devuelve el primer interprete Python EXISTENTE de los candidatos.
-        La comprobacion de pymupdf la hace el preflight con ese interprete.
-        Devuelve $null si no hay ninguno.
+        Returns the first candidate that actually RUNS. Interpreters that exist
+        but are broken (Microsoft Store stubs, dangling venvs) are skipped.
+        Whether pymupdf is installed is checked later by the preflight with the
+        returned interpreter. Returns $null if none works.
     #>
     foreach ($p in (Get-PythonCandidates)) {
-        if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+        if (Test-Apa7PythonWorks -File $p) { return $p }
     }
     return $null
 }
 
 # ---------------------------------------------------------------------------
-# Utilidades compartidas
+# Shared utilities
 # ---------------------------------------------------------------------------
 function Get-NodeCmd {
-    <#  Ruta al ejecutable de Node, o $null. Nunca usa $LASTEXITCODE.  #>
+    <#  Path to the Node executable, or $null. Never uses $LASTEXITCODE.  #>
     foreach ($n in @('node', 'node.exe')) {
         $cmd = Get-Command $n -ErrorAction SilentlyContinue
         if ($cmd) { return $cmd.Source }
@@ -336,8 +393,8 @@ function Get-NodeCmd {
 }
 
 function Get-NpmCmd {
-    # En Windows se prefiere npm.cmd: es un ejecutable nativo y fija
-    # $LASTEXITCODE, cosa que npm.ps1 (wrapper de PowerShell) no hace.
+    # On Windows npm.cmd is preferred: it is a native executable and sets
+    # $LASTEXITCODE, which npm.ps1 (a PowerShell wrapper) does not.
     $order = if (Test-Apa7IsWindows) { @('npm.cmd', 'npm', 'npm.exe', 'npm.ps1') } else { @('npm', 'npm.cmd') }
     foreach ($n in $order) {
         $cmd = Get-Command $n -ErrorAction SilentlyContinue
@@ -348,10 +405,10 @@ function Get-NpmCmd {
 
 function Invoke-Native {
     <#
-        Ejecuta un comando nativo y devuelve @{ Output; ExitCode }.
-        NO usa Select-Object -First 1 sobre la salida: eso corta el pipeline
-        antes de tiempo y deja el proceso nativo colgado o con codigo de
-        salida distinto de 0, produciendo FALSOS FALTA.
+        Runs a native command and returns @{ Output; ExitCode }.
+        It does NOT use Select-Object -First 1 on the output: that cuts the
+        pipeline early and leaves the native process hung or with a non-zero
+        exit code, producing FALSE missing-tool results.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -378,7 +435,7 @@ function Get-BrewCmd {
 }
 
 function Get-PackageManagerCmd {
-    <#  winget en Windows, brew en macOS/Linux. $null si no hay ninguno.  #>
+    <#  winget on Windows, brew on macOS/Linux. $null if none.  #>
     $w = Get-WingetCmd
     if ($w) { return @{ Name = 'winget'; Path = $w } }
     $b = Get-BrewCmd
@@ -387,7 +444,7 @@ function Get-PackageManagerCmd {
 }
 
 function Write-Apa7Log {
-    <#  Escribe una linea con timestamp.  #>
+    <#  Writes a timestamped line.  #>
     param([Parameter(Mandatory = $true)][string]$Message)
     Write-Output ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message)
 }

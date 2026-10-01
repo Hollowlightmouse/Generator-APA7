@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 /**
- * build-docx.js - Aplica un MANIFIEST.json y produce el .docx en formato APA 7.
+ * build-docx.js - Applies a MANIFEST.json and produces the .docx in APA 7 format.
  *
- * Este archivo NO contiene ningun contenido de ningun documento. Antes cada
- * trabajo obligaba a editar un generador de cientos de lineas con el titulo,
- * la portada, las tablas y las 5 referencias escritas a mano (y las
- * referencias se emitian SIEMPRE, aunque el .md tuviera otras). Aqui todo
- * llega desde MANIFIEST.json, que produce scripts\md-a-manifiesto.py.
+ * This file contains NO content from ANY document. Back in the day every job
+ * meant editing a generator of hundreds of lines with the title,
+ * the cover page, the tables and the 5 references typed by hand (and the
+ * references were emitted ALWAYS, even if the .md had others). Here everything
+ * arrives from MANIFIEST.json, which scripts\md-a-manifiesto.py produces.
  *
- * Reglas APA 7 que aplica (references\normas-apa7.md es la fuente):
- *   - Times New Roman 12, doble espacio, sin espacio extra antes/despues.
- *   - Sangria de primera linea 0,5" en parrafos de cuerpo.
- *   - Texto justificado a la IZQUIERDA (no justificado a ambos margenes).
- *   - Nivel 1 centrado y en negrita; nivel 2 al margen izquierdo y en negrita.
- *   - Numero de pagina en la ESQUINA SUPERIOR DERECHA (encabezado, no pie).
- *   - La portada NO lleva numero de pagina; la numeracion visible arranca en
- *     la pagina 2, que es lo que exige APA 7.
- *   - Tablas y figuras: numero en negrita, titulo en cursiva, despues el
- *     objeto. Bordes solo horizontales en tabla.
- *   - Referencias: sangria francesa de 0,5", orden alfabetico.
+ * APA 7 rules it applies (references\apa7-format.md is the source):
+ *   - Times New Roman 12, double spacing, no extra space before/after.
+ *   - 0.5" first-line indent in body paragraphs.
+ *   - Text aligned to the LEFT (not justified to both margins).
+ *   - Level 1 centered and bold; level 2 flush left and bold.
+ *   - Page number in the TOP RIGHT CORNER (header, not footer).
+ *   - The cover page has NO page number; visible numbering starts on
+ *     page 2, which is what APA 7 requires.
+ *   - Tables and figures: number in bold, title in italics, then the
+ *     object. Horizontal borders only in tables.
+ *   - References: 0.5" hanging indent, alphabetical order.
  *
- * Uso:
+ * Usage:
  *   node build-docx.js --manifiesto MANIFIEST.json --out salida.docx
  *                      [--log salida\_logs\02-docx.log]
  */
@@ -31,12 +31,12 @@ const fs = require("fs");
 const path = require("path");
 
 /**
- * Node resuelve `require` desde la carpeta del SCRIPT, no desde la carpeta
- * actual. Como `docx` se instala en <skill>\.work y este script vive en
- * <skill>\scripts, un `require("docx")` normal falla siempre.
+ * Node resolves `require` from the SCRIPT's folder, not from the current
+ * folder. Since `docx` is installed in <skill>\.work and this script lives in
+ * <skill>\scripts, a normal `require("docx")` always fails.
  *
- * Se resuelve explicitamente la ruta del modulo en vez de obligar al usuario a
- * copiar el .js dentro de .work o a instalar docx de forma global.
+ * The module path is resolved explicitly instead of forcing the user to
+ * copy the .js inside .work or to install docx globally.
  */
 const RAIZ_SKILL = path.resolve(__dirname, "..");
 const WORKDIR = process.env.APA7_WORKDIR
@@ -45,9 +45,9 @@ const WORKDIR = process.env.APA7_WORKDIR
 const RUTA_DOCX = path.join(WORKDIR, "node_modules", "docx");
 
 if (!fs.existsSync(RUTA_DOCX)) {
-  console.error("FALLO: no se encuentra el paquete 'docx' en");
+  console.error("FAILURE: the 'docx' package was not found in");
   console.error("       " + RUTA_DOCX);
-  console.error("Ejecute scripts\\instalar-entorno.ps1 para instalarlo en el workdir de la skill.");
+  console.error("Run scripts\\instalar-entorno.ps1 to install it in the skill's workdir.");
   process.exit(3);
 }
 
@@ -59,7 +59,7 @@ const {
 } = require(RUTA_DOCX);
 
 // ---------------------------------------------------------------------------
-// Parametros
+// Parameters
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
@@ -76,7 +76,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv);
 if (!args.manifiesto || !args.out) {
-  console.error("Uso: node build-docx.js --manifiesto MANIFEST.json --out salida.docx [--log log.txt]");
+  console.error("Usage: node build-docx.js --manifiesto MANIFEST.json --out salida.docx [--log log.txt]");
   process.exit(2);
 }
 
@@ -87,82 +87,82 @@ function log(msg) {
   console.log(line);
 }
 
-// readFileSync con "utf8" NO quita el BOM y JSON.parse aborta si lo hay:
-// el parser escribe el manifiesto sin BOM, pero si el usuario lo abre y lo
-// guarda desde un editor de Windows, vuelve con BOM.
+// readFileSync with "utf8" does NOT strip the BOM and JSON.parse aborts if there
+// is one: the parser writes the manifest without a BOM, but if the user opens it
+// and saves it from a Windows editor, it comes back with a BOM.
 const M = JSON.parse(fs.readFileSync(args.manifiesto, "utf8").replace(/^\uFEFF/, ""));
 const DOCX = args.out;
 
-// --- Validacion critica del manifiesto (abortar, no adivinar) ---------------
-// Antes el documento se entregaba con los titulos de tablas y figuras en
-// blanco: el indice imprimia "(sin titulo)" y el cuerpo se saltaba el titulo
-// entero, sin avisar en ninguna parte. Una tabla o figura APA sin titulo es un
-// defecto de forma, no una preferencia, asi que aqui se corta el proceso.
+// --- Critical manifest validation (abort, do not guess) ---------------------
+// Back in the day the document was delivered with blank table and figure
+// titles: the index printed "(sin titulo)" and the body skipped the whole title,
+// without warning anywhere. An APA table or figure without a title is a formal
+// defect, not a preference, so the process is cut here.
 const faltantes = [];
 for (const t of M.tablas || []) {
   if (!t.titulo || !String(t.titulo).trim()) {
-    faltantes.push(`Tabla ${t.indice}: sin titulo`);
+    faltantes.push(`Table ${t.indice}: no title`);
   }
 }
 for (const f of M.figuras || []) {
   if (!f.titulo || !String(f.titulo).trim()) {
-    faltantes.push(`Figura ${f.indice}: sin leyenda`);
+    faltantes.push(`Figure ${f.indice}: no caption`);
   }
 }
 if (faltantes.length) {
-  console.error("ERROR: el manifiesto tiene objetos de APA sin titulo. No se genera el .docx.");
+  console.error("ERROR: the manifest has APA objects without a title. The .docx is not generated.");
   for (const m of faltantes) console.error(`  - ${m}`);
   console.error("");
-  console.error("Resuelvelas en el parser (no en este script): el .md, un");
-  console.error("--titulos-tabla.json / --titulos-figura-json, o preguntando al usuario.");
-  console.error("Consulta M.diagnostico.preguntas y M.diagnostico.pendientes_bloqueantes.");
+  console.error("Fix them in the parser (not in this script): the .md, a");
+  console.error("--titulos-tabla.json / --titulos-figura-json, or by asking the user.");
+  console.error("Check M.diagnostico.preguntas and M.diagnostico.pendientes_bloqueantes.");
   process.exit(4);
 }
 
 // ---------------------------------------------------------------------------
-// Constantes de formato
+// Formatting constants
 // ---------------------------------------------------------------------------
 
 const FUENTE = "Times New Roman";
 const TAM = 24;                       // 12 pt = 24 half-points
-const DOBLE = 480;                    // doble espacio (twips: 240 = simple)
-const SANGRIA_1RA = 720;              // 0,5 pulgada
-const ANCHO_CONTENIDO = 9360;         // 8,5" - 1" - 1" = 6,5" en twips
-const TIPO_PAGINA = { width: 12240, height: 15840 }; // Carta
-const MARGEN = 1440;                  // 1 pulgada
+const DOBLE = 480;                    // double spacing (twips: 240 = single)
+const SANGRIA_1RA = 720;              // 0.5 inch
+const ANCHO_CONTENIDO = 9360;         // 8.5" - 1" - 1" = 6.5" in twips
+const TIPO_PAGINA = { width: 12240, height: 15840 }; // Letter
+const MARGEN = 1440;                  // 1 inch
 
-// Pagina apaisada para tablas anchas. APA 7 lo permite: una tabla que no cabe
-// comoda en vertical se presenta en una pagina horizontal aparte, manteniendo
-// margenes de 1 pulgada. El ancho util pasa de 6,5" a 9".
+// Landscape page for wide tables. APA 7 allows it: a table that does not fit
+// comfortably in portrait is shown on a separate landscape page, keeping
+// 1-inch margins. The usable width goes from 6.5" to 9".
 const ANCHO_CONTENIDO_H = TIPO_PAGINA.height - 2 * MARGEN; // 11" - 2" = 9"
 
-// Criterio para decidir si una tabla necesita pagina apaisada. Se dispara por
-// ANCHURA, no por numero de filas: una tabla de 200 filas y 3 columnas se lee
-// bien en vertical, mientras que una de 8 columnas queda aplastada.
-const UMBRAL_COLUMNAS_ANCHAS = 6;    // a partir de 6 columnas
-const UMBRAL_LINEAS_APRETADAS = 8;    // lineas por celda que ya no se leen
-const ANCHO_CARACTER_TWIP = 120;      // ancho medio de un caracter a 12 pt
-const MARGEN_CELDA_LR = 160;          // margenes izquierdo y derecho de celda
+// Criterion to decide whether a table needs a landscape page. It triggers on
+// WIDTH, not on row count: a 200-row, 3-column table reads fine in portrait,
+// while an 8-column one ends up crushed.
+const UMBRAL_COLUMNAS_ANCHAS = 6;    // from 6 columns on
+const UMBRAL_LINEAS_APRETADAS = 8;    // lines per cell that are no longer readable
+const ANCHO_CARACTER_TWIP = 120;      // average character width at 12 pt
+const MARGEN_CELDA_LR = 160;          // cell left and right margins
 
-// Portada en 3 zonas verticales reales: titulo arriba, integrantes en el centro
-// de la pagina y bloque institucional anclado abajo. Se construye como una tabla
-// SIN bordes de 1 columna x 3 filas, con alto fijo y alineacion vertical, en vez
-// de con parrafos vacios de relleno: asi las zonas no se mueven segun quantos
-// integrantes o campos traiga el documento.
+// Cover page in 3 real vertical zones: title at the top, members in the middle
+// of the page and the institutional block anchored at the bottom. It is built as
+// a borderless table of 1 column x 3 rows, with fixed height and vertical
+// alignment, instead of with filler empty paragraphs: that way the zones do not
+// move depending on how many members or fields the document brings.
 //
-// INVARIANTE: las tres filas tienen que sumar EXACTAMENTE ALTO_UTIL. Si suman mas,
-// la ultima fila se desborda a una pagina nueva y el documento gana una pagina.
-// Por eso la tercera zona absorbe el redondeo en vez de valer un tercio fijo.
+// INVARIANT: the three rows must add up to EXACTLY ALTO_UTIL. If they add up to
+// more, the last row overflows onto a new page and the document gains a page.
+// That is why the third zone absorbs the rounding instead of being a fixed third.
 const ALTO_UTIL = TIPO_PAGINA.height - 2 * MARGEN;      // 9" = 12960 twips = 648 pt
-const ZONA_ALTO = Math.round(ALTO_UTIL / 3);            // 4320: y 72..288 pt, logo + titulo
-const ZONA_CENTRO = Math.round(ALTO_UTIL / 3);          // 4320: y 288..504 pt, integrantes
-const ZONA_BAJO = ALTO_UTIL - ZONA_ALTO - ZONA_CENTRO;  // 4320: y 504..720 pt, bloque
-const AIRE_ZONA_ALTA = 720;          // el titulo arranca ~0,5" por debajo del margen
+const ZONA_ALTO = Math.round(ALTO_UTIL / 3);            // 4320: y 72..288 pt, logo + title
+const ZONA_CENTRO = Math.round(ALTO_UTIL / 3);          // 4320: y 288..504 pt, members
+const ZONA_BAJO = ALTO_UTIL - ZONA_ALTO - ZONA_CENTRO;  // 4320: y 504..720 pt, block
+const AIRE_ZONA_ALTA = 720;          // the title starts ~0.5" below the margin
 
 const B = (color) => ({ style: BorderStyle.SINGLE, size: 4, color: color || "000000" });
 const SIN_BORDE = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
 
-/** Segmentos de texto del manifiesto -> TextRun[], respetando negrita/cursiva. */
+/** Text segments from the manifest -> TextRun[], honoring bold/italics. */
 function runsDe(segmentos, extra = {}) {
   if (!segmentos || !segmentos.length) return [new TextRun({ text: "", ...extra })];
   return segmentos.map((s) => new TextRun({
@@ -175,7 +175,7 @@ function runsDe(segmentos, extra = {}) {
   }));
 }
 
-/** Inserta cursiva solo en el rango confirmado de una referencia. */
+/** Inserts italics only in the confirmed range of a reference. */
 function runsDeReferencia(ref) {
   const texto = ref.texto;
   const rango = ref.cursiva_confirmada || ref.cursiva_propuesta;
@@ -184,7 +184,7 @@ function runsDeReferencia(ref) {
   }
   const i = texto.indexOf(rango);
   if (i < 0) {
-    log(`    [aviso] el rango en cursiva "${rango.slice(0, 40)}..." no aparece en la referencia; se deja en plano.`);
+    log(`    [warning] the italic range "${rango.slice(0, 40)}..." does not appear in the reference; it is left in plain text.`);
     return [new TextRun({ text: texto, font: FUENTE, size: TAM })];
   }
   const antes = texto.slice(0, i);
@@ -197,7 +197,7 @@ function runsDeReferencia(ref) {
 }
 
 // ---------------------------------------------------------------------------
-// Encabezado con numero de pagina (esquina superior derecha, APA 7)
+// Header with page number (top right corner, APA 7)
 // ---------------------------------------------------------------------------
 
 const headerConPagina = new Header({
@@ -212,7 +212,7 @@ const headerVacio = new Header({ children: [new Paragraph({ children: [] })] });
 const footerVacio = new Footer({ children: [new Paragraph({ children: [] })] });
 
 // ---------------------------------------------------------------------------
-// Portada
+// Cover page
 // ---------------------------------------------------------------------------
 
 function parrafoCentrado(children, opts = {}) {
@@ -224,7 +224,7 @@ function parrafoCentrado(children, opts = {}) {
   });
 }
 
-// Linea de la portada, centrada.
+// A line of the cover page, centered.
 function lineaPortada(children, spacing) {
   return new Paragraph({
     alignment: AlignmentType.CENTER,
@@ -234,44 +234,44 @@ function lineaPortada(children, spacing) {
 }
 
 /**
- * Portada en 3 zonas verticales: logo + titulo arriba, integrantes en el centro
- * vertical de la pagina y el resto de los datos institucionales anclados abajo.
+ * Cover page in 3 vertical zones: logo + title at the top, members at the vertical
+ * center of the page and the remaining institutional data anchored at the bottom.
  *
- * Antes esto se hacia apilando parrafos y rellenando con lineas vacias, lo que
- * dejaba a los integrantes pegados al titulo y el bloque institucional a media
- * pagina.
+ * Back in the day this was done by stacking paragraphs and padding with empty
+ * lines, which left the members glued to the title and the institutional block
+ * in the middle of the page.
  *
- * Se hace con UNA tabla de 1 columna x 3 filas, sin bordes visibles, con alto
- * fijo por fila y alineacion vertical. Es una tabla y no tres apiladas a proposito:
- * dos o mas tablas consecutivas se fusionan en Word y LibreOffice las trata de
- * forma inconsistente, y el conjunto se desborda a una pagina extra.
+ * It is done with ONE table of 1 column x 3 rows, with no visible borders, with a
+ * fixed height per row and vertical alignment. It is a table and not three stacked
+ * on purpose: two or more consecutive tables get merged by Word and LibreOffice
+ * treats them inconsistently, and the set overflows onto an extra page.
  */
 function construirPortada() {
   const p = M.portada || {};
   const centro = (text, bold = false) => [new TextRun({ text, bold, font: FUENTE, size: TAM })];
 
-  // --- Zona alta: logo opcional y titulo ---------------------------------
+  // --- Top zone: optional logo and title -----------------------------------
   const zonaAlta = [];
   if (p.logo) {
-    // El logo es un recurso opcional que aporta el usuario. Nunca se inventa el
-    // nombre de una institucion.
+    // The logo is an optional resource supplied by the user. An institution's
+    // name is never invented.
     const ext = path.extname(p.logo).toLowerCase();
     const tipo = ext === ".jpg" || ext === ".jpeg" ? "jpg" : (ext === ".gif" ? "gif" : "png");
     zonaAlta.push(lineaPortada([new ImageRun({
       type: tipo,
       data: fs.readFileSync(p.logo),
       transformation: { width: 160, height: 160 },
-    })], { line: 240, before: 0, after: 0 }));   // simple: una imagen no se interlinea
+    })], { line: 240, before: 0, after: 0 }));   // single: an image has no line spacing
     if (p.logo_leyenda) zonaAlta.push(lineaPortada(centro(p.logo_leyenda)));
   }
-  // Sin logo no se inserta NADA: ni placeholder, ni marco, ni la palabra "Logo"
-  // que antes se colaba en el PDF.
+  // With no logo NOTHING is inserted: neither a placeholder, nor a frame, nor the
+  // word "Logo" that used to sneak into the PDF.
   if (p.titulo) zonaAlta.push(lineaPortada(centro(p.titulo, true)));
 
-  // --- Zona central: integrantes -----------------------------------------
-  // references/portada-institucional.md: los integrantes van en UN SOLO parrafo
-  // centrado, separados por coma y con "y" antes del ultimo, sin importar
-  // cuantos sean. Antes se emitia un parrafo por persona.
+  // --- Central zone: members ------------------------------------------------
+  // references\institutional-cover.md: the members go in a SINGLE paragraph
+  // centered, separated by comma and with "y" before the last one, regardless of
+  // how many there are. Back in the day one paragraph per person was emitted.
   const zonaCentro = [];
   if (p.autores && p.autores.length) {
     const nombres = p.autores.map((a) => String(a).trim()).filter(Boolean);
@@ -284,9 +284,9 @@ function construirPortada() {
     }
   }
 
-  // --- Zona baja: datos institucionales ----------------------------------
-  // El orden depende de lo que traiga el documento: si un campo no esta, no se
-  // deja linea en blanco. Los ausentes simplemente no se emiten.
+  // --- Bottom zone: institutional data --------------------------------------
+  // The order depends on what the document brings: if a field is absent, no
+  // blank line is left. The missing ones are simply not emitted.
   const zonaBaja = [];
   if (p.docente) {
     const d = [p.docente, p.docente_titulo].filter(Boolean).join(", ");
@@ -299,8 +299,8 @@ function construirPortada() {
   if (p.fecha) zonaBaja.push(lineaPortada(centro(p.fecha)));
 
   const filaZona = (children, alto, alineacion, margenSuperior = 0) => new TableRow({
-    // ATLEAST y no EXACT: si el contenido no cabe (titulo de 3 lineas, 6
-    // integrantes) la fila crece en vez de recortar el texto.
+    // ATLEAST and not EXACT: if the content does not fit (a 3-line title, 6
+    // members) the row grows instead of cutting the text.
     height: { value: alto, rule: HeightRule.ATLEAST },
     children: [new TableCell({
       children: children.length ? children : [lineaPortada([new TextRun({ text: "", size: TAM })])],
@@ -317,9 +317,9 @@ function construirPortada() {
   return [new Table({
     width: { size: ANCHO_CONTENIDO, type: WidthType.DXA },
     layout: TableLayoutType.FIXED,
-    // El aire de la zona alta se DESCUENTA de su altura: las filas tienen que
-    // sumar justo el alto util (12960 twips). Sumar por encima desborda la
-    // ultima fila a una pagina nueva.
+    // The top zone's spacing is SUBTRACTED from its height: the rows have to add
+    // up to exactly the usable height (12960 twips). Adding more overflows the
+    // last row onto a new page.
     rows: [
       filaZona(zonaAlta, ZONA_ALTO - AIRE_ZONA_ALTA, VerticalAlign.TOP, AIRE_ZONA_ALTA),
       filaZona(zonaCentro, ZONA_CENTRO, VerticalAlign.CENTER),
@@ -329,7 +329,7 @@ function construirPortada() {
 }
 
 // ---------------------------------------------------------------------------
-// Tabla de contenido con campos PAGEREF
+// Table of contents with PAGEREF fields
 // ---------------------------------------------------------------------------
 
 function lineaTOC(texto, bookmark, nivel = 1) {
@@ -349,11 +349,11 @@ function construirIndices() {
   const hijos = [];
   const opts = M.opciones || {};
 
-  // --- Tabla de contenido: SIEMPRE -------------------------------------
+  // --- Table of contents: ALWAYS --------------------------------------------
   hijos.push(parrafoCentrado([new TextRun({ text: "Tabla de contenido", bold: true, font: FUENTE, size: TAM })]));
 
-  // Los titulos repetidos se desambiguan SOLO si el manifiesto lo pide, para
-  // que la TOC sea navegable sin alterar el texto del documento.
+  // Repeated titles are disambiguated ONLY if the manifest asks for it, so that
+  // the TOC is navigable without altering the document's text.
   const vistos = new Map();
   for (const s of M.secciones) {
     let texto = s.texto;
@@ -361,12 +361,12 @@ function construirIndices() {
     vistos.set(texto, n);
     if (n > 1 && opts.dedupe_toc) {
       texto = `${texto} (${s.hid})`;
-      log(`    TOC: titulo repetido -> "${texto}"`);
+      log(`    TOC: repeated title -> "${texto}"`);
     }
     hijos.push(lineaTOC(texto, `apa_sec_${s.hid}`, s.nivel));
   }
 
-  // --- Indice de tablas: solo si HAY tablas -----------------------------
+  // --- List of tables: only if there ARE tables -----------------------------
   if (opts.indice_tablas && M.tablas && M.tablas.length) {
     hijos.push(new Paragraph({ children: [new PageBreak()] }));
     hijos.push(parrafoCentrado([new TextRun({ text: "Indice de tablas", bold: true, font: FUENTE, size: TAM })]));
@@ -375,18 +375,18 @@ function construirIndices() {
       hijos.push(lineaTOC(`Tabla ${t.indice}. ${et}`, `apa_tbl_${t.indice}`, 1));
     }
   } else if (M.tablas && M.tablas.length) {
-    log("    Indice de tablas OMITIDO por decision explicita del manifiesto.");
+    log("    List of tables OMITTED by explicit manifest decision.");
   }
 
-  // --- Indice de figuras: solo si HAY figuras ---------------------------
+  // --- List of figures: only if there ARE figures ---------------------------
   if (opts.indice_figuras && M.figuras && M.figuras.length) {
-    // Solo las figuras que de verdad entran en el cuerpo. Listar tambien las
-    // omitidas deja una linea con "Error: no se encontro el origen de la
-    // referencia", porque su marcador nunca se crea.
+    // Only the figures that actually make it into the body. Listing the omitted
+    // ones too leaves a line with "Error: no se encontro el origen de la
+    // referencia", because their bookmark is never created.
     const figsValidas = M.figuras.filter((f) => f.existe);
     const omitidas = M.figuras.length - figsValidas.length;
     if (omitidas > 0) {
-      log(`    Indice de figuras: se omiten ${omitidas} linea(s) por figura ausente.`);
+      log(`    List of figures: ${omitidas} line(s) are omitted for a missing figure.`);
     }
     if (figsValidas.length) {
       hijos.push(new Paragraph({ children: [new PageBreak()] }));
@@ -397,13 +397,13 @@ function construirIndices() {
       }
     }
   } else if (M.figuras && M.figuras.length) {
-    log("    Indice de figuras OMITIDO por decision explicita del manifiesto.");
+    log("    List of figures OMITTED by explicit manifest decision.");
   }
 
-  // El cuerpo arranca SIEMPRE en pagina nueva. No se deja que lo empuje el
-  // primer encabezado de nivel 1: en el cuerpo ese heading va el primero, asi
-  // que su guardian "si ya hay algo escrito" nunca se cumple y el texto se
-  // colgaba debajo del indice de tablas, en la misma pagina.
+  // The body ALWAYS starts on a new page. It is not left to be pushed by the
+  // first level 1 heading: in the body that heading goes first, so its "if
+  // something has already been written" guard is never met and the text used to
+  // hang below the list of tables, on the same page.
   if (hijos.length) {
     hijos.push(new Paragraph({ children: [new PageBreak()] }));
   }
@@ -412,12 +412,12 @@ function construirIndices() {
 }
 
 // ---------------------------------------------------------------------------
-// Tablas
+// Tables
 // ---------------------------------------------------------------------------
 
-// Estima cuantas lineas ocupa el texto de una celda si la tabla se maqueta en
-// vertical. Con `layout: FIXED` cada columna mide ancho_total / ncols, asi que
-// el numero de caracteres por linea sale de ahi, no del contenido real.
+// Estimates how many lines the text of a cell takes if the table is laid out in
+// portrait. With `layout: FIXED` each column measures ancho_total / ncols, so the
+// number of characters per line comes from there, not from the real content.
 function lineasDeCelda(texto, anchoColumna) {
   const utiles = anchoColumna - MARGEN_CELDA_LR;
   if (utiles <= 0) return Number.POSITIVE_INFINITY;
@@ -426,8 +426,8 @@ function lineasDeCelda(texto, anchoColumna) {
   return texto.split("\n").reduce((total, linea) => total + Math.max(1, Math.ceil(linea.length / porLinea)), 0);
 }
 
-// Decide si una tabla va en pagina apaisada y deja constancia del motivo, que
-// se imprime en el log y se guarda en el manifiesto para poder auditarlo.
+// Decides whether a table goes on a landscape page and records the reason, which
+// is printed in the log and saved in the manifest so it can be audited.
 function evaluarAncho(t) {
   const ncols = Math.max(...t.filas.map((f) => f.length));
   const columnaVertical = ANCHO_CONTENIDO / ncols;
@@ -443,13 +443,13 @@ function evaluarAncho(t) {
     }
   }
 
-  // La decision se toma con la tabla en vertical. Si ahi ya esta apretada pero
-  // en apaisado se lee bien, el apaisado es la solucion y no solo un luxejo.
+  // The decision is made with the table in portrait. If it is already cramped
+  // there but reads well in landscape, landscape is the solution, not just a luxury.
   let motivo = "";
   if (ncols >= UMBRAL_COLUMNAS_ANCHAS) {
-    motivo = `${ncols} columnas (umbral ${UMBRAL_COLUMNAS_ANCHAS})`;
+    motivo = `${ncols} columns (threshold ${UMBRAL_COLUMNAS_ANCHAS})`;
   } else if (peorVertical >= UMBRAL_LINEAS_APRETADAS && peorApaisada < UMBRAL_LINEAS_APRETADAS) {
-    motivo = `celda de hasta ${peorVertical} lineas en vertical, ${peorApaisada} en apaisado`;
+    motivo = `cell of up to ${peorVertical} lines in portrait, ${peorApaisada} in landscape`;
   }
 
   return {
@@ -465,10 +465,10 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
   const hijos = [];
   const ncols = Math.max(...t.filas.map((f) => f.length));
 
-  // Numero en negrita encima de la tabla; titulo en cursiva debajo (APA 7).
-  // El marcador va en el numero: es lo que el indice de tablas apunta con
-  // PAGEREF, y si no existe, el indice sale con "Error: no se encontro el
-  // origen de la referencia" en cada linea.
+  // Number in bold above the table; title in italics below (APA 7).
+  // The bookmark goes on the number: that is what the list of tables points at
+  // with PAGEREF, and if it does not exist, the index comes out with "Error: no
+  // se encontro el origen de la referencia" on every line.
   hijos.push(new Paragraph({
     spacing: { line: DOBLE, before: 0, after: 0 },
     keepNext: true,
@@ -508,8 +508,8 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
         width: { size: Math.floor(ancho / ncols), type: WidthType.DXA },
         verticalAlign: VerticalAlign.CENTER,
         margins: { top: 60, bottom: 60, left: 80, right: 80 },
-        // APA 7: sin lineas verticales. Solo el borde superior de la tabla,
-        // la linea bajo la fila de encabezado y el borde inferior.
+        // APA 7: no vertical lines. Only the table's top border,
+        // the line under the header row and the bottom border.
         borders: {
           top: esCabecera ? B() : SIN_BORDE,
           bottom: (esCabecera || esUltima) ? B() : SIN_BORDE,
@@ -521,8 +521,8 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
     return new TableRow({ children: celdas, tableHeader: esCabecera, cantSplit: false });
   });
 
-  // Borde inferior solo en la ultima fila: APA 7 no usa lineas verticales.
-  // (se resuelve al crear cada celda, no mutando el XML generado)
+  // Bottom border only on the last row: APA 7 does not use vertical lines.
+  // (resolved when creating each cell, not by mutating the generated XML)
 
   hijos.push(new Table({
     rows: filasDoc,
@@ -543,17 +543,17 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
 }
 
 // ---------------------------------------------------------------------------
-// Figuras
+// Figures
 // ---------------------------------------------------------------------------
 
 function construirFigura(f) {
   const hijos = [];
   if (!f.existe) {
-    log(`    Figura ${f.indice} OMITIDA: no existe el archivo "${f.ruta}".`);
+    log(`    Figure ${f.indice} OMITTED: the file "${f.ruta}" does not exist.`);
     return hijos;
   }
 
-  // El marcador va en el numero, que es lo que apunta el indice de figuras.
+  // The bookmark goes on the number, which is what the list of figures points at.
   hijos.push(new Paragraph({
     spacing: { line: DOBLE, before: 0, after: 0 },
     keepNext: true,
@@ -570,12 +570,12 @@ function construirFigura(f) {
     }));
   }
 
-// docx trabaja en pixeles a 96 DPI: 1 pulgada = 96 px.
+// docx works in pixels at 96 DPI: 1 inch = 96 px.
 
-// Tamano real de la imagen leyendo su cabecera. No se usa `new ImageRun(...)`
-// como sonda porque NO expone las dimensiones: devolvia 1x1 y todas las figuras
-// salian cuadradas (6,50 x 6,50 in) aunque el original fuera 14,58 x 5,00.
-// Asi se lee el ancho y el alto de verdad, sin anadir dependencias.
+// Real image size by reading its header. `new ImageRun(...)` is not used as a
+// probe because it does NOT expose the dimensions: it returned 1x1 and every
+// figure came out square (6.50 x 6.50 in) even when the original was 14.58 x
+// 5.00. This way the real width and height are read, without adding dependencies.
 function dimensionesImagen(ruta) {
   const b = fs.readFileSync(ruta);
   if (b.length > 24 && b.readUInt32BE(0) === 0x89504e47) {
@@ -586,7 +586,7 @@ function dimensionesImagen(ruta) {
     while (i + 9 < b.length) {
       if (b[i] !== 0xff) { i += 1; continue; }
       const marcador = b[i + 1];
-      // SOF0..SOF15, saltando los no-carga (DHT/DQT/DRI...).
+      // SOF0..SOF15, skipping the non-load ones (DHT/DQT/DRI...).
       if (marcador >= 0xc0 && marcador <= 0xcf &&
           ![0xc4, 0xc8, 0xcc].includes(marcador)) {
         return { ancho: b.readUInt16BE(i + 7), alto: b.readUInt16BE(i + 5) };
@@ -608,14 +608,14 @@ function dimensionesImagen(ruta) {
   const dim = dimensionesImagen(f.ruta_absoluta);
   if (!dim || !dim.ancho || !dim.alto) {
     throw new Error(
-      `No se pudo leer el tamaño de la imagen "${f.ruta}". Se sabe leer la ` +
-      "cabecera de PNG, JPEG, GIF y BMP; si es otro formato, conviértela antes.");
+      `Could not read the size of the image "${f.ruta}". The header of PNG, ` +
+      "JPEG, GIF and BMP can be read; if it is another format, convert it first.");
   }
   const ext = path.extname(f.ruta).toLowerCase();
   const tipo = ext === ".jpg" || ext === ".jpeg" ? "jpg" : (ext === ".gif" ? "gif" : "png");
 
-  // El ancho sale del manifiesto (caja del original) y el alto del archivo, para
-  // no deformar. Si aun asi se pasa de alto, se escala en bloque.
+  // The width comes from the manifest (the original's box) and the height from
+  // the file, so it does not get distorted; if it still ends up too tall, it is scaled as a whole.
   let anchoPx = Math.round(anchoMaxIn * 96);
   let altoPx = Math.round(anchoPx * (dim.alto / dim.ancho));
   if (f.alto_in) {
@@ -626,27 +626,27 @@ function dimensionesImagen(ruta) {
       altoPx = topePx;
     }
   }
-  if (altoPx > 648) {                       // 6,75 in: la mitad de la hoja util
+  if (altoPx > 648) {                       // 6.75 in: half of the usable sheet
     const k = 648 / altoPx;
     anchoPx = Math.round(anchoPx * k);
     altoPx = 648;
   }
-  // Una imagen nunca se agranda mas alla de su propio tamano en pixeles: estirar
-  // un icono de 260 px hasta 6,5 pulgadas solo produce un borron. Se respeta la
-  // caja del original, salvo que pida mas grande de lo que la imagen da.
+  // An image is never enlarged beyond its own size in pixels: stretching
+  // a 260 px icon to 6.5 inches only produces a blur. The original's box is
+  // respected, unless it asks for something bigger than the image provides.
   if (anchoPx > dim.ancho) {
     const k = dim.ancho / anchoPx;
     anchoPx = dim.ancho;
     altoPx = Math.round(altoPx * k);
   }
 
-  // La nota general de la FIGURA va ENCIMA de la imagen (APA 7 la distingue de
-  // la de tabla, que va debajo). Antes se empujaba despues del ImageRun, que es
-  // la posicion de la nota especifica y no de la general.
+  // The FIGURE's general note goes ABOVE the image (APA 7 distinguishes it from
+  // the table's, which goes below). Back in the day it was pushed after the
+  // ImageRun, which is the position of the specific note, not the general one.
   //
-  // keepNext es obligatorio: sin el, una nota al final de una pagina se queda
-  // sola y su imagen salta a la siguiente, dejando la nota de la figura N en la
-  // pagina anterior. Es exactamente el caso que produce un documento incoherente.
+  // keepNext is mandatory: without it, a note at the end of a page stays alone and
+  // its image jumps to the next one, leaving figure N's note on the previous
+  // page. That is exactly the case that produces an inconsistent document.
   if (f.nota) {
     hijos.push(new Paragraph({
       spacing: { line: 240, before: 0, after: 0 },
@@ -672,18 +672,18 @@ function dimensionesImagen(ruta) {
 }
 
 // ---------------------------------------------------------------------------
-// Cuerpo: recorre el flujo de bloques del manifiesto
+// Body: walks the manifest's block stream
 // ---------------------------------------------------------------------------
 
-// Devuelve el cuerpo partido en tramos, en vez de una lista plana. Un tramo
-// es `{paisaje, hijos, ocupado}` y cada tramo se convierte en una seccion del
-// .docx. Las tablas anchas van en tramos apaisados y el texto vuelve a vertical
-// despues.
+// Returns the body split into segments, instead of a flat list. A segment
+// is `{paisaje, hijos, ocupado}` and each segment becomes a section of the
+// .docx. Wide tables go in landscape segments and the text goes back to portrait
+// afterwards.
 //
-// `hayContenidoPrevio` dice si algo ya se escribio en la seccion antes de este
-// cuerpo (son los indices). No se usa para rellenar el tramo, sino para decidir
-// si un encabezado de nivel 1 necesita salto de pagina: sin el, el primer titulo
-// se pegaria al final del indice.
+// `hayContenidoPrevio` says whether something was already written in the section
+// before this body (they are the indexes). It is not used to fill the segment,
+// but to decide whether a level 1 heading needs a page break: without it, the
+// first title would stick to the end of the index.
 function construirCuerpoSegmentado(hayContenidoPrevio) {
   const tramos = [];
   const porHid = new Map(M.secciones.map((s) => [s.hid, s]));
@@ -692,14 +692,14 @@ function construirCuerpoSegmentado(hayContenidoPrevio) {
   let actual = { paisaje: false, hijos: [], ocupado: !!hayContenidoPrevio };
   tramos.push(actual);
 
-  // Emitir un bloque cualquiera en el tramo actual.
+  // Emit any block in the current segment.
   const emitir = (x) => {
     actual.hijos.push(x);
     actual.ocupado = true;
   };
 
-  // Abre un tramo. Si el anterior ya es apaisado, se reutiliza: dos tablas
-  // anchas seguidas comparten pagina horizontal en vez de alternar dos veces.
+  // Opens a segment. If the previous one is already landscape it is reused: two
+  // wide tables in a row share a landscape page instead of alternating twice.
   const abrirTramo = (paisaje) => {
     const ultimo = tramos[tramos.length - 1];
     if (ultimo.paisaje === paisaje) {
@@ -715,38 +715,38 @@ function construirCuerpoSegmentado(hayContenidoPrevio) {
     switch (b.tipo) {
       case "portada":
       case "portada_dato":
-        // La portada ya se construyo aparte, con su propio formato.
+        // The cover page was already built separately, with its own format.
         break;
 
       case "h": {
         const s = porHid.get(b.hid) || { nivel: b.nivel, texto: b.texto };
         const nivel = s.nivel;
         const nivel1 = nivel === 1;
-        // APA 7: n1 centrado negrita; n2 margen izq. negrita; n3 margen izq.
-        // negrita+cursiva; n4 y n5 con sangria de primera linea, negrita (n5
-        // tambien cursiva) y punto final, con el texto siguiendo en la MISMA
-        // linea. Antes todo lo que no fuera nivel 1 salia en negrita y alineado
-        // a la izquierda, asi que los niveles 3, 4 y 5 no se distinguian.
+        // APA 7: n1 centered bold; n2 flush left bold; n3 flush left
+        // bold+italics; n4 and n5 with first-line indent, bold (n5
+        // also italic) and final period, with the text continuing on the SAME
+        // line. Back in the day everything that was not level 1 came out bold
+        // and left aligned, so levels 3, 4 and 5 were indistinguishable.
         const nivel3 = nivel === 3;
         const nivelEnLinea = nivel === 4 || nivel === 5;
         const estilo = { bold: true, italics: nivel3 || nivel === 5 };
-        // Los hijos se montan ANTES de crear el Paragraph: la libreria no
-        // expone `children` como array mutable, asi que pushear despues falla.
+        // The children are built BEFORE creating the Paragraph: the library does
+        // not expose `children` as a mutable array, so pushing afterwards fails.
         const hijosCab = [new Bookmark({
           id: `apa_sec_${b.hid}`,
           children: runsDe(b.segmentos, estilo),
         })];
         if (nivelEnLinea) {
-          // Titulo en linea: el punto final cierra el titulo y el cuerpo del
-          // parrafo continua a continuacion en el mismo parrafo.
+          // Title inline: the final period closes the title and the body of the
+          // paragraph continues right after it in the same paragraph.
           hijosCab.push(new TextRun({ text: ". ", font: FUENTE, size: TAM, ...estilo }));
           if (b.en_linea_segmentos) hijosCab.push(...runsDe(b.en_linea_segmentos));
         }
-        // APA 7: nivel 1 empieza en pagina nueva. Se marca con
-        // `pageBreakBefore` en el propio encabezado y NO con un parrafo
-        // suelto que contenga un PageBreak: ese parrafo vacio, cuando la pagina
-        // anterior ya esta llena, no cabe en ella, salta a la siguiente y deja
-        // una pagina en blanco antes del titulo.
+        // APA 7: level 1 starts on a new page. It is marked with
+        // `pageBreakBefore` on the heading itself and NOT with a stray
+        // paragraph containing a PageBreak: that empty paragraph, when the
+        // previous page is already full, does not fit in it, jumps to the next
+        // one and leaves a blank page before the title.
         const p = new Paragraph({
           alignment: nivel1 ? AlignmentType.CENTER : AlignmentType.LEFT,
           spacing: { line: DOBLE, before: 0, after: 0 },
@@ -783,7 +783,7 @@ function construirCuerpoSegmentado(hayContenidoPrevio) {
         const ancho = evaluarAncho(t);
         decisiones.push({ indice: t.indice, ...ancho });
         if (ancho.ancha) {
-          // La tabla va en su propia pagina apaisada, con su titulo y su nota.
+          // The table goes on its own landscape page, with its title and its note.
           abrirTramo(true);
           actual.hijos.push(...construirTabla(t, ANCHO_CONTENIDO_H));
           actual.ocupado = true;
@@ -808,46 +808,46 @@ function construirCuerpoSegmentado(hayContenidoPrevio) {
         break;
 
       default:
-        log(`    [aviso] tipo de bloque desconocido: "${b.tipo}". Se omite.`);
+        log(`    [warning] unknown block type: "${b.tipo}". It is skipped.`);
     }
   }
 
-  // Los tramos que se quedaron vacios (tipicamente el vertical anterior y
-  // posterior a una tabla ancha) no se usan porque darian paginas en blanco.
+  // The segments that ended up empty (typically the portrait one before and after
+  // a wide table) are not used because they would create blank pages.
   const conContenido = tramos.filter((t) => t.hijos.length > 0);
 
   for (const d of decisiones) {
     if (d.ancha) {
-      log(`  Tabla ${d.indice}: pagina apaisada -> ${d.motivo}.`);
+      log(`  Table ${d.indice}: landscape page -> ${d.motivo}.`);
     } else {
-      log(`  Tabla ${d.indice}: vertical (${d.ncols} columnas, celda de hasta ${d.peorVertical} lineas).`);
+      log(`  Table ${d.indice}: portrait (${d.ncols} columns, cell of up to ${d.peorVertical} lines).`);
     }
   }
   const apaisadas = decisiones.filter((d) => d.ancha).length;
-  log(`  Orientacion: ${apaisadas} tabla(s) apaisada(s) de ${decisiones.length}.`);
+  log(`  Orientation: ${apaisadas} landscape table(s) out of ${decisiones.length}.`);
 
   return conContenido;
 }
 
 // ---------------------------------------------------------------------------
-// Referencias
+// References
 // ---------------------------------------------------------------------------
 
 function construirReferencias() {
   const hijos = [];
   const refs = (M.referencias || []).slice();
-  // APA 7 exige orden alfabetico. El .md puede no venir ordenado.
+  // APA 7 requires alphabetical order. The .md may not come sorted.
   refs.sort((a, b) => a.texto.localeCompare(b.texto, "es", { sensitivity: "base" }));
 
-  log(`  Referencias: ${refs.length} (ordenadas alfabeticamente en el .docx).`);
+  log(`  References: ${refs.length} (sorted alphabetically in the .docx).`);
   for (const r of refs) {
     if (r.cursiva_propuesta) {
-      log(`    cursiva a revisar: "${r.cursiva_propuesta.slice(0, 60)}"`);
+      log(`    italics to review: "${r.cursiva_propuesta.slice(0, 60)}"`);
     }
     hijos.push(new Paragraph({
       alignment: AlignmentType.LEFT,
       spacing: { line: DOBLE, before: 0, after: 0 },
-      // Sangria francesa: 0,5" a la izquierda y -0,5" de primera linea.
+      // Hanging indent: 0.5" to the left and -0.5" first line.
       indent: { left: SANGRIA_1RA, hanging: SANGRIA_1RA },
       children: runsDeReferencia(r),
     }));
@@ -856,28 +856,28 @@ function construirReferencias() {
 }
 
 // ---------------------------------------------------------------------------
-// Ensamblado
+// Assembly
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log("=== FASE 2: construccion del .docx ===");
-  log(`Manifiesto : ${args.manifiesto}`);
-  log(`Salida     : ${DOCX}`);
-  log(`Fuente .md : ${M.fuente ? M.fuente.md : "(desconocido)"}`);
+  console.log("=== PHASE 2: building the .docx ===");
+  log(`Manifest   : ${args.manifiesto}`);
+  log(`Output     : ${DOCX}`);
+  log(`Source .md : ${M.fuente ? M.fuente.md : "(unknown)"}`);
   const p = M.portada || {};
-  log(`Portada    : titulo=${p.titulo ? "si" : "NO"} autores=${(p.autores || []).length} docente=${p.docente ? "si" : "NO"} fecha=${p.fecha ? "si" : "NO"}`);
+  log(`Cover      : title=${p.titulo ? "yes" : "NO"} authors=${(p.autores || []).length} instructor=${p.docente ? "yes" : "NO"} date=${p.fecha ? "yes" : "NO"}`);
   if (p.campos_faltantes && p.campos_faltantes.length) {
-    log(`Portada    : CAMPOS FALTANTES -> ${p.campos_faltantes.join(", ")}`);
-    log("            (la portada se genera igual; avisar al usuario de lo que falta)");
+    log(`Cover      : MISSING FIELDS -> ${p.campos_faltantes.join(", ")}`);
+    log("            (the cover page is generated anyway; warn the user about what is missing)");
   }
-  log(`Tablas     : ${M.tablas.length}   Figuras: ${M.figuras.length}   Referencias: ${M.referencias.length}`);
-  log(`Indices    : tablas=${M.opciones.indice_tablas ? "si" : "no"} figuras=${M.opciones.indice_figuras ? "si" : "no"}`);
+  log(`Tables     : ${M.tablas.length}   Figures: ${M.figuras.length}   References: ${M.referencias.length}`);
+  log(`Indexes    : tables=${M.opciones.indice_tablas ? "yes" : "no"} figures=${M.opciones.indice_figuras ? "yes" : "no"}`);
   log("");
 
   const indices = construirIndices();
-  // Los indices se quedan en la MISMA seccion que el primer tramo vertical del
-  // cuerpo. Si se separaran, el salto de seccion anadiria una pagina en blanco
-  // entre el indice y el texto, que antes no existia.
+  // The indexes stay in the SAME section as the body's first portrait segment.
+  // If they were separated, the section break would add a blank page between the
+  // index and the text, which did not exist before.
   const tramos = construirCuerpoSegmentado(indices.length > 0);
   const primerTramo = tramos[0];
   if (primerTramo && !primerTramo.paisaje) {
@@ -891,11 +891,11 @@ async function main() {
       margin: { top: MARGEN, right: MARGEN, bottom: MARGEN, left: MARGEN, header: 720, footer: 720 },
     },
   };
-  // `docx` intercambia ancho y alto por su cuenta cuando ve
-  // orientation=LANDSCAPE. Hay que darle las medidas EN VERTICAL (12240 x
-  // 15840) y marcar la orientacion: pasarlas ya invertidas produce un
-  // `w:pgSz w:w="12240" w:h="15840" w:orient="landscape"`, que Word y
-  // LibreOffice leen como vertical y la tabla sale apretada.
+  // `docx` swaps width and height on its own when it sees
+  // orientation=LANDSCAPE. It has to be given the measurements IN PORTRAIT
+  // (12240 x 15840) and the orientation marked: passing them already inverted
+  // produces a `w:pgSz w:w="12240" w:h="15840" w:orient="landscape"`, which
+  // Word and LibreOffice read as portrait and the table comes out cramped.
   const propsApaisadas = {
     page: {
       size: { width: TIPO_PAGINA.width, height: TIPO_PAGINA.height, orientation: PageOrientation.LANDSCAPE },
@@ -904,7 +904,7 @@ async function main() {
   };
 
   const secciones = [
-    // Seccion 1: portada sola, SIN numero de pagina.
+    // Section 1: cover page alone, WITHOUT page number.
     {
       properties: { ...propsVerticales, type: SectionType.NEXT_PAGE },
       headers: { default: headerVacio },
@@ -913,8 +913,8 @@ async function main() {
     },
   ];
 
-  // Si el primer tramo es apaisado, los indices necesitan seccion vertical
-  // propia; si no, ya van dentro de ese primer tramo y no se duplican.
+  // If the first segment is landscape, the indexes need their own portrait
+  // section; if not, they are already inside that segment and are not duplicated.
   if (indices.length && (!primerTramo || primerTramo.paisaje)) {
     secciones.push({
       properties: { ...propsVerticales, type: SectionType.NEXT_PAGE },
@@ -924,9 +924,9 @@ async function main() {
     });
   }
 
-  // Una seccion por tramo del cuerpo. Cada tramo abre pagina nueva, asi que una
-  // tabla apaisada queda en su propia pagina y el texto posterior vuelve a
-  // vertical. Todas repiten cabecera y pie para no perder la numeracion.
+  // One section per body segment. Each segment opens a new page, so a landscape
+  // table stays on its own page and the text afterwards goes back to portrait.
+  // All of them repeat header and footer so the numbering is not lost.
   for (const tramo of tramos) {
     secciones.push({
       properties: { ...(tramo.paisaje ? propsApaisadas : propsVerticales), type: SectionType.NEXT_PAGE },
@@ -936,15 +936,15 @@ async function main() {
     });
   }
 
-  // Seccion final: referencias, siempre en vertical.
+  // Final section: references, always in portrait.
   //
-  // El encabezado "Referencias Bibliograficas" NO viene de aqui: es un heading
-  // de nivel 1 del .md y ya quedo al final del ultimo tramo del cuerpo. Con un
-  // salto de pagina se quedaba solo en una pagina y las entradas empezaban en la
-  // siguiente. Si el tramo anterior ya es vertical se usa una seccion CONTINUA,
-  // que no rompe pagina: el encabezado baja con la primera entrada. Solo si el
-  // documento termina en una tabla apaisada hace falta una pagina nueva, porque
-  // hay que volver a vertical.
+  // The "Referencias Bibliograficas" heading does NOT come from here: it is a
+  // level 1 heading of the .md and already ended up at the end of the last body
+  // segment. With a page break it was left alone on a page and the entries began
+  // on the next one. If the previous segment is already portrait a CONTINUOUS
+  // section is used, which does not break the page: the heading drops along with
+  // the first entry. Only if the document ends on a landscape table is a new page
+  // needed, because it has to go back to portrait.
   if (refs.length) {
     const ultimoTramo = tramos[tramos.length - 1];
     const haceFaltaSalto = !ultimoTramo || ultimoTramo.paisaje;
@@ -986,19 +986,19 @@ async function main() {
   fs.writeFileSync(DOCX, buffer);
 
   log("");
-  log(`.docx escrito: ${DOCX} (${buffer.length} bytes)`);
-  log("Campos PAGEREF insertados. LibreOffice los resuelve al exportar;");
-  log("para fijarlos tambien en el .docx hace falta la macro opt-in.");
+  log(`.docx written: ${DOCX} (${buffer.length} bytes)`);
+  log("PAGEREF fields inserted. LibreOffice resolves them on export;");
+  log("to also fix them in the .docx the opt-in macro is required.");
 
   if (args.log) {
     const ld = path.dirname(path.resolve(args.log));
     if (ld && !fs.existsSync(ld)) fs.mkdirSync(ld, { recursive: true });
     fs.writeFileSync(args.log, logLines.join("\n") + "\n", "utf8");
-    log(`Log escrito : ${args.log}`);
+    log(`Log written : ${args.log}`);
   }
 }
 
 main().catch((e) => {
-  console.error("FALLO en build-docx.js:", e && e.stack ? e.stack : e);
+  console.error("FAILURE in build-docx.js:", e && e.stack ? e.stack : e);
   process.exit(1);
 });

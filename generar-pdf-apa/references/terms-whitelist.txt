@@ -1,0 +1,75 @@
+# Whitelist of terms the deglue must NOT split.
+#
+# Format: one term per line. Lines starting with '#' are ignored.
+# Comparison is CASE-SENSITIVE and by substring.
+#
+# This is the ONLY source of untouchable terms: there is no list embedded in
+# the code. Adapt it per document, here, without touching any script. If the
+# file does not exist, the deglue still works but with no extra protection.
+#
+# What each entry protects:
+#   - EXACT match: the glued word is the term ("OpenID", "SCA").
+#     Always protected.
+#   - Substring: only if the term is camelCase or contains digits ("OpenID"
+#     inside "OpenIDConnect", "ISO27002"). An all-caps acronym does NOT protect
+#     by substring, on purpose: if it did, the glues that must be undone
+#     ("OWASPTop10", "SCAySBOM") would stay intact.
+#
+# What does NOT need to be added:
+#   - Pure UPPERCASE acronyms (OWASP, CVSS, BPMN). The deglue rule only splits a
+#     lowercase letter followed by an uppercase one, so they are already safe.
+#
+# What should NOT be added:
+#   - Terms shorter than 4 characters (Git, CI, QA, In). Compared by substring
+#     they would protect unrelated words: "Di-git-al", "de-ci-sion", "c-d". Use
+#     the full name (GitLab, GitHub, CI/CD).
+#
+# Usage:
+#   python scripts\md-a-manifiesto.py --md doc.md --out MANIFEST.json ^
+#       --whitelist references\terms-whitelist.txt
+#
+# ---------------------------------------------------------------------------
+# Example list for a computer-science document. It is not any particular
+# work's list: adapt it to the document being processed. Anything the deglue
+# splits and should NOT split appears in the residue report, so it can be
+# added here without guessing.
+# ---------------------------------------------------------------------------
+
+# --- Domain acronyms --------------------------------------------------------
+# Not needed: pure uppercase is already safe for the deglue. They may be left
+# written to document the scope of the document. -----------------------------
+# CVSS
+# OWASP
+# BPMN
+# ISO27002
+
+# --- Technology and languages with camelCase: NEVER split -------------------
+NodeJS
+Node.js
+JavaScript
+TypeScript
+PowerShell
+OpenID
+MySQL
+PostgreSQL
+MongoDB
+PowerBI
+GitLab
+GitHub
+GitFlow
+SemVer
+
+# --- Names mixing letters and digits: the rule would split them -------------
+# IPv4
+# IPv6
+# SHA256
+# AES128
+# Base64
+# HTTP2
+# OAuth2
+
+# --- Surnames with a prefix: the "lowercase+M uppercase" rule breaks them ---
+# McDonald -> 'c Donald', MacArthur -> 'ac Arthur'.
+# Add the document's own here, not your default ones.
+# McDonald
+# MacArthur

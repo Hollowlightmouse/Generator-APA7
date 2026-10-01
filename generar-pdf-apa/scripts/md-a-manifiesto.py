@@ -1,54 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-md-a-manifiesto.py - Convierte un .md (y sus JSON de layout) en MANIFIEST.json
+md-a-manifiesto.py - Converts a .md (and its layout JSONs) into MANIFEST.json
 
-Este script es el CEREBRO del pipeline. Antes, cada documento obligaba a
-reescribir un generador .js de cientos de lineas con todo hardcodeado (portada,
-titulos, tablas, referencias). Ahora el .md se analiza UNA vez, se produce un
-manifiesto declarativo, y build-docx.js solo lo aplica.
+This script is the BRAIN of the pipeline. Before, every document forced you to
+rewrite a .js generator of hundreds of lines with everything hardcoded (cover,
+titles, tables, references). Now the .md is analyzed ONCE, a declarative
+manifest is produced, and build-docx.js only applies it.
 
-Que arregla respecto al pipeline anterior:
-  * Las referencias SIEMPRE salen del .md. Antes se ignoraban por completo y
-    se emitian 5 referencias literales fijas del documento de ejemplo.
-  * La correccion de "palabras pegadas" (deglue) se implementa de verdad, con
-    lista blanca. Antes solo estaba documentada y nunca se ejecutaba.
-  * Se inventarioan tablas, figuras y referencias, y se DECLARA cuando falta
-    algo, para que build-docx.js aplique la politica de indices condicionales.
-  * Se detectan vinetas U+2022 y el artefacto "o " de Docling, y la
-    numeracion duplicada "1. 1.".
+What it fixes compared to the previous pipeline:
+  * References ALWAYS come from the .md. Before they were ignored completely and
+    5 fixed literal references from the sample document were emitted.
+  * The correction of "glued words" (deglue) is really implemented, with a
+    whitelist. Before it was only documented and never executed.
+  * Tables, figures and references are inventoried, and it is DECLARED when
+    something is missing, so that build-docx.js applies the conditional index policy.
+  * U+2022 bullets and Docling's "o " artifact are detected, as well as the
+    duplicated numbering "1. 1.".
 
-Solo libreria estandar: no requiere pip install de nada.
+Standard library only: it requires no pip install of anything.
 
-Uso tipico:
+Typical usage:
     python md-a-manifiesto.py --md doc.md --out salida/MANIFEST.json \
-        --log salida/_logs/01-analisis.log [--imagenes salida/imagenes.json] \
+        --log salida/_logs/01-analisis.log \
         [--portada portada.json] [--ancho-pagina-landscape]
 
-Respuestas del agente (JSON {indice: texto}, indice base 1):
-    --titulos-tabla-json   titulo de cada tabla, si el .md no lo trae
-    --titulos-figura-json  leyenda de cada figura, si el .md no la trae
-    --notas-tabla-json      nota de cada tabla; por defecto "Elaboracion propia"
-    --notas-figura-json     nota de cada figura; por defecto "Elaboracion propia"
+Agent answers (JSON {index: text}, 1-based index):
+    --titulos-tabla-json   title of each table, if the .md does not bring it
+    --titulos-figura-json  caption of each figure, if the .md does not bring it
+    --notas-tabla-json      note of each table; default "Elaboracion propia"
+    --notas-figura-json     note of each figure; default "Elaboracion propia"
 
-    Se pasan solo para los indices que falten. Sirven para responder a las
-    preguntas bloqueantes que el propio parser deja en
-    MANIFEST.json -> diagnostico.preguntas: si el usuario elige que se redacte
-    el titulo desde el contexto, se escribe aqui y se vuelve a ejecutar el
-    parser. build-docx.js NO acepta estos ficheros.
+    They are passed only for the missing indexes. They serve to answer the
+    blocking questions that the parser itself leaves in
+    MANIFEST.json -> diagnostico.preguntas: if the user chooses that the title be
+    drafted from the context, it is written here and the parser is run again.
+    build-docx.js does NOT accept these files.
 
-Opciones de analisis:
-    --sin-deglue            no aplicar la correccion de "palabras pegadas"
-    --whitelist FICH        terminos intocables (sin lista base en el codigo)
+Analysis options:
+    --sin-deglue            do not apply the "glued words" correction
+    --whitelist FILE        untouchable terms (no base list in the code)
     --detectar-niveles-en-linea
-                            tratar "**Titulo.** texto" como nivel 4 y
-                            "***Titulo.*** texto" como nivel 5 (APA 7 en linea).
-                            Opt-in: la negrita al abrir parrafo tambien es texto
-                            normal y activarlo sin control crearia titulos falsos.
+                            treat "**Titulo.** text" as level 4 and
+                            "***Titulo.*** text" as level 5 (APA 7 inline).
+                            Opt-in: bold at the start of a paragraph is also
+                            normal text, and enabling it without control would
+                            create fake titles.
 
-Salida: MANIFEST.json + un informe de analisis legible. Las preguntas
-bloqueantes pendientes quedan en diagnostico.pendientes_bloqueantes; los
-titulos o leyendas ausentes hacen que build-docx.js aborte en vez de inventarlos.
+Output: MANIFEST.json + a readable analysis report. The pending blocking
+questions stay in diagnostico.pendientes_bloqueantes; missing titles or captions
+make build-docx.js abort instead of inventing them.
 """
 
 import argparse
@@ -64,42 +65,43 @@ from datetime import datetime, timezone
 VERSION_MANIFIESTO = 1
 
 # ---------------------------------------------------------------------------
-# Lista blanca de terminos que NUNCA se separan al pegar palabras.
+# Whitelist of terms that are NEVER split when words get glued together.
 #
-# No hay lista base en el codigo, a proposito: cualquier termino incrustado
-# aqui contaminationa el pipeline con el dominio de un trabajo concreto. La
-# lista blanca de un documento se define por documento, en
-#   references/terminos-whitelist.txt
-# y se pasa con  --whitelist <fichero>.
+# There is no base list in the code, on purpose: any term hardcoded here would
+# contaminate the pipeline with the domain of one concrete piece of work. A
+# document's whitelist is defined per document, in
+#   references/terms-whitelist.txt
+# and it is passed with  --whitelist <file>.
 #
-# La comparacion es SENSIBLE A MAYUSCULAS y por subcadena, asi que conviene
-# anadir el termino con su forma exacta tal como aparece en el .md.
+# The comparison is CASE SENSITIVE and by substring, so it is best to add the
+# term with its exact form as it appears in the .md.
 #
-# Pauta al elegir terminos:
-#   - Anade los que tienen camelCase interno (NodeJS -> 'Node JS', MySQL ->
-#     'My SQL', OpenID -> 'Open ID') y los que mezclan letra y numero
+# Guideline when choosing terms:
+#   - Add the ones with internal camelCase (NodeJS -> 'Node JS', MySQL ->
+#     'My SQL', OpenID -> 'Open ID') and the ones mixing letters and numbers
 #     (IPv4, SHA256, AES128 -> 'IPv 4', 'SHA 256', 'AES 128').
-#   - Las siglas en MAYUSCULAS puras (OWASP, CVSS, SDL) NO necesitan entrar: la
-#     regla solo parte minuscula seguida de mayuscula, asi que ya son seguras.
-#   - EVITA terminos de menos de 4 caracteres (Git, CI, QA, In). Comparados por
-#     subcadena protegen palabras sin relacion: "Di-git-al", "de-ci-sion", "c-d".
-#   - Los apellidos con prefijo (McDonald, MacArthur) si se rompen, se anaden al
-#     fichero del documento; no se meten aqui.
+#   - Pure UPPERCASE acronyms (OWASP, CVSS, SDL) do NOT need to be added: the
+#     rule only splits lowercase followed by uppercase, so they are already safe.
+#   - AVOID terms shorter than 4 characters (Git, CI, QA, In). Matched by
+#     substring they would protect unrelated words: "Di-git-al", "de-ci-sion", "c-d".
+#   - Prefixed surnames (McDonald, MacArthur), if they break, are added to the
+#     document's file; they do not go here.
 #
-# Sin lista blanca el deglue puede partir un termino legitimo. No es un fallo
-# silencioso: todo lo que cambia queda en el informe de residuos para revision.
+# Without a whitelist the deglue may split a legitimate term. That is not a
+# silent failure: everything that changes shows up in the residue report for
+# review.
 # ---------------------------------------------------------------------------
 
-# Vinetas y simbolos que las conversiones dejan pegados al inicio de linea.
+# Bullets and symbols that the conversions leave glued to the start of a line.
 BULLET_CHARS = "\u2022\u25cf\u25aa\u25e6\u2043\u2219\u00b7\u2023\u2027"
 
 # ---------------------------------------------------------------------------
-# Utilidades de texto
+# Text utilities
 # ---------------------------------------------------------------------------
 
 
 def norm_key(text):
-    """Minusculas sin acentos, para comparar titulos de forma tolerante."""
+    """Lowercase without accents, to compare titles in a tolerant way."""
     t = unicodedata.normalize("NFD", text.lower())
     t = "".join(c for c in t if unicodedata.category(c) != "Mn")
     t = re.sub(r"[^a-z0-9]+", " ", t)
@@ -107,7 +109,7 @@ def norm_key(text):
 
 
 def read_text(path):
-    """Lee texto detectando UTF-8/BOM. Los .md de MinerU y Docling son UTF-8."""
+    """Reads text detecting UTF-8/BOM. The .md files from MinerU and Docling are UTF-8."""
     with open(path, "rb") as fh:
         raw = fh.read()
     if raw.startswith(b"\xef\xbb\xbf"):
@@ -124,11 +126,11 @@ def read_text(path):
 
 
 def read_json(path):
-    """Carga un JSON de entrada tolerando BOM.
+    """Loads an input JSON tolerating a BOM.
 
-    Importa usar read_text y no open(..., encoding='utf-8'): en Windows,
-    Set-Content -Encoding UTF8 y la mayoria de editores guardan con BOM, y
-    json.load aborta con 'Unexpected UTF-8 BOM' si el fichero la lleva.
+    It is better to use read_text instead of open(..., encoding='utf-8'): on Windows,
+    Set-Content -Encoding UTF8 and most editors save with a BOM, and
+    json.load aborts with 'Unexpected UTF-8 BOM' if the file carries it.
     """
     return json.loads(read_text(path))
 
@@ -142,27 +144,27 @@ def sha256_of(path):
 
 
 def unescape_md(text):
-    """Quita el escape de markdown: 'A00\\_2021' -> 'A00_2021'."""
+    """Removes the markdown escaping: 'A00\\_2021' -> 'A00_2021'."""
     return re.sub(r"\\([_\\*`~\[\]()#+\-.!])", r"\1", text)
 
 
 def strip_leading_markers(text):
     """
-    Quita vinetas de conversion al inicio de la linea.
+    Removes conversion bullets at the start of the line.
 
-    Casos reales medidos en documentos de Docling:
+    Real cases measured in Docling documents:
       '\u2022 Objetivos Especificos:'  -> 'Objetivos Especificos:'
       '\u2022 1. Entrenamiento (Training): ...' -> '1. Entrenamiento ...'
       'o Descripcion Tecnica: ...'       -> 'Descripcion Tecnica: ...'
-    El patron 'o ' solo se quita si NO es una palabra legitima: exigimos que
-    tras el marcador venga una mayuscula o un numero, y que el resto sea largo.
+    The 'o ' pattern is only removed if it is NOT a legitimate word: we require that
+    after the marker comes an uppercase letter or a number, and that the rest is long.
     """
     original = text
-    # 1) Vinetas unicode (posiblemente repetidas: '\u2022 \u2022 texto')
+    # 1) Unicode bullets (possibly repeated: '\u2022 \u2022 text')
     text = re.sub(r"^[\s" + BULLET_CHARS + r"]+[\s]*", "", text)
-    # 2) Marcadores ascii repetidos: '- - texto', '* * texto', '\u2013 \u2022 texto'
+    # 2) Repeated ascii markers: '- - text', '* * text', '\u2013 \u2022 text'
     text = re.sub(r"^[\s\-\*\u2013\u2014]{2,}", "", text)
-    # 3) Artefacto 'o ' de Docling (vinieta de segundo nivel convertida a letra)
+    # 3) Docling's 'o ' artifact (second-level bullet converted to a letter)
     m = re.match(r"^[oO][\s\t]+(?=[A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]|\d)", text)
     if m and len(text) > 3:
         text = text[m.end():]
@@ -171,11 +173,11 @@ def strip_leading_markers(text):
 
 def dedupe_numbering(text):
     """
-    Normaliza la numeracion de lista duplicada por artefacto de extraccion.
+    Normalizes list numbering duplicated by an extraction artifact.
 
     '1. 1. Analizar ...' -> '1. Analizar ...'
-    '\u2022 1. 1. texto'  -> '\u2022 1. texto'   (el prefijo ya se quito antes)
-    Se conserva el primer numero y se descarta el repetido.
+    '\u2022 1. 1. texto'  -> '\u2022 1. texto'   (the prefix was removed before)
+    The first number is kept and the repeated one is discarded.
     """
     text = re.sub(r"^(\d+)\.\s+\d+\.\s+", r"\1. ", text)
     text = re.sub(r"^(\d+)\)\s+\d+\)\s+", r"\1) ", text)
@@ -183,44 +185,44 @@ def dedupe_numbering(text):
 
 
 def fix_colon_spacing(text):
-    """'ACTIVIDAD 4 : Title' -> 'ACTIVIDAD 4: Title'  (espacio antes de ':')."""
+    """'ACTIVIDAD 4 : Title' -> 'ACTIVIDAD 4: Title'  (space before ':')."""
     return re.sub(r"[ \t]+([:;])", r"\1", text)
 
 
 # ---------------------------------------------------------------------------
-# deglue: separar palabras pegadas por la conversion
+# deglue: split words glued together by the conversion
 # ---------------------------------------------------------------------------
 
 GLUE_RE = re.compile(r"([a-z\u00f1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00e0])([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00c0\u00c8][a-z\u00f1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00e0]{0,})")
-# 'ACTIVIDAD1:' / 'CR1.4' -> numero pegado a palabra EN MAYUSCULAS.
-# El guardia (?![-\u2013]\d) evita partir identificadores con guion: 'CVE2021-44228'
-# debe quedarse entero, no convertirse en 'CVE 2021-44228'.
+# 'ACTIVIDAD1:' / 'CR1.4' -> number glued to an UPPERCASE word.
+# The (?![-\u2013]\d) guard avoids splitting hyphenated identifiers: 'CVE2021-44228'
+# must stay whole, not become 'CVE 2021-44228'.
 GLUE_NUM_RE = re.compile(r"\b([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc]{3,})(\d+)\b(?![-\u2013]\d)")
-# 'SegunelMarco' ya lo cubre GLUE_RE; ':Diferenciacion' cubre el degglu de ':'
+# 'SegunelMarco' is already covered by GLUE_RE; ':Diferenciacion' covers the deglue of ':'
 COLON_RE = re.compile(r"(:)(?=[A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc])")
-# 'Digital(Portal)' -> 'Digital (Portal)': falta el espacio antes del parentesis.
-# Se exige >=4 caracteres dentro para no tocar abreviaturas como '(Ed.', '(n. 2)'.
+# 'Digital(Portal)' -> 'Digital (Portal)': the space before the parenthesis is missing.
+# >=4 characters inside are required so abbreviations like '(Ed.', '(n. 2)' are left alone.
 PAREN_RE = re.compile(r"([a-z\u00f1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00e0])\(([^()]{4,})\)")
-# 'SCAySBOM' -> 'SCA y SBOM': sigla, conjuncion de una letra, otra sigla.
-# Es la pegadura de siglas mas comun en informes y GLUE_RE no la ve, porque
-# exige minuscula seguida de mayuscula y aqui solo hay una minuscula en medio.
+# 'SCAySBOM' -> 'SCA y SBOM': acronym, one-letter conjunction, another acronym.
+# This is the most common acronym gluing in reports and GLUE_RE does not see it, because
+# it requires lowercase followed by uppercase and here there is only one lowercase in between.
 GLUE_SIGLA_Y_RE = re.compile(
     r"([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc]{3,})"
     r"([a-z\u00f1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00e0])"
     r"([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc]{2,})")
-# 'OWASPTop10' -> 'OWASP Top10': sigla en mayusculas pegada a capitalizada.
+# 'OWASPTop10' -> 'OWASP Top10': uppercase acronym glued to a capitalized word.
 GLUE_ACR_RE = re.compile(
     r"([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc]{3,})"
     r"([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc][a-z\u00f1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00e0]+)")
-# 'Top10' -> 'Top 10', 'Junio2021' -> 'Junio 2021': palabra pegada a numero.
-# La lista blanca cubre los casos en que NO se separan: IPv6, SHA256, Base64...
-# De ahi la importancia de anadir a terminos-whitelist.txt los terminos con
-# letra y numero del documento en curso.
+# 'Top10' -> 'Top 10', 'Junio2021' -> 'Junio 2021': word glued to a number.
+# The whitelist covers the cases where they are NOT split: IPv6, SHA256, Base64...
+# Hence the importance of adding to terms-whitelist.txt the terms with
+# letters and numbers from the document at hand.
 GLUE_PALABRA_NUM_RE = re.compile(
     r"([A-Za-z\u00c0-\u00ff]{3,})(\d{1,4})(?![0-9A-Za-z-])")
-# '10de' -> '10 de', '2Capa' -> '2 Capa', '3Mes5' -> '3 Mes 5': numero pegado a
-# la palabra siguiente. Solo se acepta capitalizada o una de las palabras
-# funcionales del espanol, para no partir '3er' ni 'v2beta'.
+# '10de' -> '10 de', '2Capa' -> '2 Capa', '3Mes5' -> '3 Mes 5': number glued to
+# the following word. Only capitalized words or Spanish function words are
+# accepted, so as not to split '3er' nor 'v2beta'.
 GLUE_NUM_PALABRA_RE = re.compile(
     r"(\d{1,4})(?=[A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc][a-z\u00f1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00e0]"
     r"|(?:de|del|la|el|los|las|un|una|y|en|con|para|por)\b)")
@@ -228,50 +230,50 @@ GLUE_NUM_PALABRA_RE = re.compile(
 
 def deglue(text, whitelist, apply=True):
     """
-    Inserta espacios en palabras pegadas por la conversion del PDF a texto.
+    Inserts spaces in words glued together by the PDF-to-text conversion.
 
-    Casos reales del documento de referencia:
+    Real cases from the reference document:
       'SegunelMarcoBSIMM'                  -> 'Segun el Marco BSIMM'
       'modeladodeamenazas'                 -> 'modelado de amenazas'
       'ACTIVIDAD4'                         -> 'ACTIVIDAD 4'
       '2:Diferenciacion'                   -> '2: Diferenciacion'
 
-    Por que NO separar:
-      los terminos de la lista blanca del documento (--whitelist), que son
-      camelCase legitimos: separarlos produciria 'Node JS', que es un error
-      igual de grave que no separar nada.
-      Las siglas en MAYUSCULAS puras ('OWASP', 'CVSS') no se tocan: la regla
-      exige minuscula seguida de mayuscula.
+    Why NOT to split:
+      the terms in the document's whitelist (--whitelist), which are
+      legitimate camelCase: splitting them would produce 'Node JS', which is an error
+      just as serious as not splitting anything.
+      Pure UPPERCASE acronyms ('OWASP', 'CVSS') are not touched: the rule
+      requires lowercase followed by uppercase.
 
-    La lista blanca se evalua sobre la PALABRA completa que contiene el punto de
-    union, no sobre una ventana de contexto. Esto es deliberado: con una ventana
-    de contexto, terminos cortos de la lista ('In', 'CI', 'CD') aparecen dentro
-    de casi cualquier frase y desactivarian la correccion en todo el documento.
-    A nivel de palabra, un termino protegido queda intacto y 'yDatos' se separa
-    igual.
+    The whitelist is evaluated on the WHOLE word containing the junction point,
+    not on a context window. This is deliberate: with a context window, short
+    entries from the list ('In', 'CI', 'CD') appear inside almost any sentence and
+    would disable the correction across the whole document.
+    At word level, a protected term stays intact and 'yDatos' is split
+    just the same.
 
-    Devuelve (texto_corregido, lista_de_cambios) para poder reportarlos.
+    Returns (corrected_text, list_of_changes) so that they can be reported.
     """
     cambios = []
     if not apply or not text:
         return text, cambios
 
-    # Regex de lista blanca, escaped y SENSIBLE A MAYUSCULAS.
+    # Whitelist regex, escaped and CASE SENSITIVE.
     #
-    # La sensibilidad no es un detalle: con re.I el termino "Git" (el control de
-    # versiones) aparecia dentro de "DiGITal" y protegia la palabra completa, y
-    # "CI" aparecia dentro de "deCIsion". Con comparacion insensible, cualquier
-    # sigla corta anula la correccion en medio el documento. Comparando con las
-    # mayusculas exactas, "Git" solo protege "Git", "GitLab" y "GitHub".
+    # Case sensitivity is not a detail: with re.I the term "Git" (version control)
+    # used to appear inside "DiGITal" and protected the whole word, and
+    # "CI" used to appear inside "deCIsion". With a case-insensitive comparison, any
+    # short acronym voids the correction in the middle of the document. Comparing with the
+    # exact uppercase, "Git" only protects "Git", "GitLab" and "GitHub".
     if whitelist:
         pat = "|".join(re.escape(t) for t in sorted(whitelist, key=len, reverse=True))
         wl_re = re.compile("(?:" + pat + ")")
-        # Subconjunto que puede proteger por subcadena. El criterio NO es
-        # "tiene mayusculas": "OWASP" y "SCA" las tienen y sin embargo son
-        # justamente las siglas que hay que poder partir ("OWASPTop10",
-        # "SCAySBOM"). Entran los nombres MEZCLADOS ("OpenID", "JavaScript",
-        # "IPv6") y los que llevan digitos ("ISO27002", "MD5"), que si conviene
-        # proteger aunque sean mayusculas.
+        # Subset that can protect by substring. The criterion is NOT
+        # "has uppercase letters": "OWASP" and "SCA" have them and yet they are
+        # precisely the acronyms that must be splittable ("OWASPTop10",
+        # "SCAySBOM"). MIXED-case names go in ("OpenID", "JavaScript",
+        # "IPv6") and those carrying digits ("ISO27002", "MD5"), which are indeed
+        # worth protecting even when they are uppercase.
         wl_camel = frozenset(
             t for t in whitelist
             if (any(c.islower() for c in t) and any(c.isupper() for c in t[1:]))
@@ -281,7 +283,7 @@ def deglue(text, whitelist, apply=True):
         wl_re = None
         wl_camel = frozenset()
 
-    # Maximo run de caracteres que pueden formar una palabra pegada.
+    # Maximum run of characters that can form a glued word.
     token_chars = r"[0-9A-Za-z\u00c0-\u00ff_./\\-]"
 
     def palabra_en(pos, longitud, cadena):
@@ -297,20 +299,20 @@ def deglue(text, whitelist, apply=True):
         if wl_re is None:
             return False
         palabra = palabra_en(pos, longitud, cadena)
-        # Dos modos de proteccion, y la distincion es lo que hace que la lista
-        # blanca sirva para algo:
+        # Two protection modes, and that distinction is what makes the list
+        # useful:
         #
-        #  1. Coincidencia EXACTA: la palabra pegada es el termino ("Portal",
-        #     "SCA"). Protege siempre.
-        #  2. Subcadena: el termino esta DENTRO de una palabra pegada mas larga
-        #     ("OpenID" dentro de "OpenIDConnect"). Solo se aplica a terminos
-        #     en camelCase o con digitos.
+        #  1. EXACT match: the glued word IS the term ("Portal",
+        #     "SCA"). Always protects.
+        #  2. Substring: the term is INSIDE a longer glued word
+        #     ("OpenID" inside "OpenIDConnect"). Only applied to terms
+        #     in camelCase or with digits.
         #
-        # Las siglas EN MAYUSCULAS no protegen por subcadena a proposito:
-        # si lo hicieran, "SCA" protegeria "SCAySBOM" y "OWASP" protegeria
-        # "OWASPTop10", que son exactamente las pegaduras que hay que deshacer.
-        # El precio es que un producto como "OWASPJuiceShop" habra que anadirlo
-        # completo a la lista blanca; la lista es editable justamente para eso.
+        # UPPERCASE acronyms do not protect by substring on purpose:
+        # if they did, "SCA" would protect "SCAySBOM" and "OWASP" would protect
+        # "OWASPTop10", which are exactly the gluings that must be undone.
+        # The price is that a product like "OWASPJuiceShop" will have to be added
+        # whole to the whitelist; the list is editable precisely for that.
         if palabra in whitelist:
             return True
         return any(t in palabra for t in wl_camel)
@@ -324,11 +326,11 @@ def deglue(text, whitelist, apply=True):
 
     out = GLUE_RE.sub(sub_glue, text)
 
-    # El orden importa. GLUE_RE va primero porque ve 'SegunelMarco'; pero parte
-    # 'SCAySBOM' en 'SCAy SBOM' y despues ya no queda nada que una regla de
-    # siglas pueda arreglar, asi que las reglas de sigla se aplican ANTES que
-    # GLUE_RE. Por eso se evaluan todas contra 'text' y se encadenan en orden
-    # inverso al de aplicacion.
+    # The order matters. GLUE_RE goes first because it sees 'SegunelMarco'; but it splits
+    # 'SCAySBOM' into 'SCAy SBOM' and afterwards there is nothing left that an acronym
+    # rule could fix, so the acronym rules are applied BEFORE GLUE_RE. That is why they
+    # are all evaluated against 'text' and chained in the inverse order
+    # of application.
     def sub_sigla_y(m):
         if protegida(m.start(), len(m.group(0)), text):
             return m.group(0)
@@ -375,10 +377,10 @@ def deglue(text, whitelist, apply=True):
     out = COLON_RE.sub(sub_colon, out)
 
     def sub_paren(m):
-        # Proteger solo la palabra ANTERIOR al parentesis. Si se midiera el
-        # match entero, palabra_en devolveria "Digital(Portal)" completo y
-        # el termino en lista blanca de dentro del parentesis protegeria toda la
-        # frase, con lo que esta regla no corregiria nada util.
+        # Protect only the word BEFORE the parenthesis. If the whole
+        # match were measured, palabra_en would return the complete "Digital(Portal)" and
+        # the whitelisted term inside the parenthesis would protect the whole
+        # sentence, so this rule would not correct anything useful.
         if protegida(m.start(), 1, out):
             return m.group(0)
         cambios.append(("paren", m.group(0), m.group(1) + " (" + m.group(2) + ")"))
@@ -389,7 +391,7 @@ def deglue(text, whitelist, apply=True):
 
 
 # ---------------------------------------------------------------------------
-# Formato en linea -> segmentos (negrita / cursiva)
+# Inline formatting -> segments (bold / italic)
 # ---------------------------------------------------------------------------
 
 INLINE_RE = re.compile(r"(\*\*.+?\*\*|\*[^*\n]+?\*|__.+?__|_[^_\n]+?_)")
@@ -397,8 +399,8 @@ INLINE_RE = re.compile(r"(\*\*.+?\*\*|\*[^*\n]+?\*|__.+?__|_[^_\n]+?_)")
 
 def parse_inline(text):
     """
-    Convierte 'texto **negrita** y *cursiva*' en una lista de segmentos.
-    Devuelve [{'text':..., 'bold':bool, 'italics':bool}, ...]
+    Converts 'text **bold** and *italic*' into a list of segments.
+    Returns [{'text':..., 'bold':bool, 'italics':bool}, ...]
     """
     segs = []
     pos = 0
@@ -421,7 +423,7 @@ def parse_inline(text):
 
 
 # ---------------------------------------------------------------------------
-# Tablas
+# Tables
 # ---------------------------------------------------------------------------
 
 HTML_TABLE_RE = re.compile(r"<table[^>]*>.*?</table>", re.I | re.S)
@@ -432,7 +434,7 @@ TAG_RE = re.compile(r"<[^>]+>")
 
 
 def cell_to_text(raw):
-    txt = BR_RE.sub(" \u21b5 ", raw)   # salto de linea dentro de la celda
+    txt = BR_RE.sub(" \u21b5 ", raw)   # line break inside the cell
     txt = TAG_RE.sub("", txt)
     txt = html.unescape(html.unescape(txt))
     txt = unescape_md(txt)
@@ -454,7 +456,7 @@ def parse_html_table(block):
 
 
 def parse_md_table(lines, start):
-    """Detecta una tabla markdown |a|b| ... Devuelve (filas, fin_indice)."""
+    """Detects a markdown table |a|b| ... Returns (rows, end_index)."""
     filas = []
     i = start
     while i < len(lines):
@@ -472,7 +474,7 @@ def parse_md_table(lines, start):
 
 
 # ---------------------------------------------------------------------------
-# Referencias: deteccion del rango en cursiva (heuristica + avisos)
+# References: detection of the italic range (heuristic + warnings)
 # ---------------------------------------------------------------------------
 
 YEAR_RE = re.compile(r"\((?:19|20)\d{2}[a-z]?\)")
@@ -484,19 +486,19 @@ BARE_URL_RE = re.compile(r"(https?://\S+)\s*$")
 
 def propose_reference_italics(text):
     """
-    PROPUESTA (no definitiva) de que parte de la referencia va en cursiva.
+    PROPOSAL (not definitive) of which part of the reference goes in italics.
 
-    APA 7 depende de si la fuente es un libro, informe, articulo de revista o
-    tesis, y esa distincion no se puede determinar de forma fiable solo con el
-    texto plano que produce la conversion. Por eso:
+    APA 7 depends on whether the source is a book, a report, a journal article or
+    a thesis, and that distinction cannot be determined reliably from the plain
+    text alone that the conversion produces. Therefore:
 
-      1. se aplica una heuristica conservadora, y
-      2. se devuelve un aviso para que el agente/agente-usuario la revise.
+      1. a conservative heuristic is applied, and
+      2. a warning is returned so that the agent/user-agent reviews it.
 
-    Reglas:
-      * Revista/periodico  -> cursiva en el nombre de la revista.
-      * Repositorio/tesis  -> cursiva en el titulo de la obra.
-      * Documentacion web   -> cursiva en el titulo de la obra.
+    Rules:
+      * Journal/periodical  -> italics on the journal name.
+      * Repository/thesis   -> italics on the work title.
+      * Web documentation   -> italics on the work title.
     """
     cuerpo = text
     m = URL_TAIL_RE.search(cuerpo)
@@ -516,7 +518,7 @@ def propose_reference_italics(text):
         return None, "sin titulo tras el anio"
 
     if REVISTA_RE.search(cuerpo):
-        # El titulo del articulo va plano; el nombre de la revista, en cursiva.
+        # The article title stays plain; the journal name goes in italics.
         mrev = REVISTA_RE.search(resto)
         if mrev:
             ini_rev = mrev.start()
@@ -524,7 +526,7 @@ def propose_reference_italics(text):
                 ini_rev -= 1
             fin_rev = mrev.end()
             cola = resto[fin_rev:]
-            # Incluir el parentesis de edicion/volumen: '(Ed. 164)', '(Vol. 3, n. 2)'
+            # Include the edition/volume parenthesis: '(Ed. 164)', '(Vol. 3, n. 2)'
             mpar = re.match(r"^[^()]{0,24}\([^()]*\)", cola)
             if mpar:
                 fin_rev += mpar.end()
@@ -537,9 +539,9 @@ def propose_reference_italics(text):
                 return cand, "revista"
         return resto.split(".")[0], "articulo"
 
-    # Libro / informe / tesis / documentacion: cursiva en el titulo de la obra.
+    # Book / report / thesis / documentation: italics on the work title.
     if TESIS_RE.search(cuerpo):
-        # En una tesis la parte en cursiva abarca titulo + institucion.
+        # In a thesis the italic part spans title + institution.
         cortes = list(re.finditer(r"\.\s+(?=[A-Z\u00c1\u00c9\u00cd\u00d3\u00da])", resto))
         for k, c in enumerate(cortes[:2]):
             fin = c.start() + 1
@@ -550,13 +552,13 @@ def propose_reference_italics(text):
 
 
 # ---------------------------------------------------------------------------
-# Analisis principal
+# Main analysis
 # ---------------------------------------------------------------------------
 
 RE_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
-# Titulo APA de nivel 4 ("**Texto.** el resto del parrafo") o de nivel 5
-# ("***Texto.*** ..."). El grupo 1 dice si es nivel 5 (asteriscos triples),
-# el grupo 2 es el texto del titulo, que debe terminar en punto.
+# Level 4 APA title ("**Texto.** the rest of the paragraph") or level 5
+# ("***Texto.*** ..."). Group 1 says whether it is level 5 (triple asterisks),
+# group 2 is the title text, which must end in a period.
 RE_TITULO_EN_LINEA = re.compile(r"^(\*{3}|\*\*)(?!\s)(.+?)\.\1\s+(\S.*)$", re.S)
 RE_IMAGEN = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 RE_NUM_HEADING = re.compile(r"^\s*(\d{1,2})[\.\)]\s+(.*)$")
@@ -575,7 +577,7 @@ CAMPOS_PORTADA = [
 
 
 def cargar_whitelist(ruta_extra):
-    """Terminos intocables. Solo proceden del fichero indicado: no hay base en codigo."""
+    """Untouchable terms. They come only from the given file: there is no base in code."""
     terms = set()
     if ruta_extra and os.path.isfile(ruta_extra):
         for ln in read_text(ruta_extra).splitlines():
@@ -586,38 +588,38 @@ def cargar_whitelist(ruta_extra):
 
 
 # ---------------------------------------------------------------------------
-# Enriquecimiento desde MinerU / Docling
+# Enrichment from MinerU / Docling
 # ---------------------------------------------------------------------------
-# El contrato real de entrada no es solo "un .md": MinerU y Docling entregan el
-# .md de prosa MAS un *_content_list.json con la estructura (tablas con su HTML,
-# su bbox y su pagina) y una carpeta images/ con los recortes de cada tabla.
-# El .md por si solo pierde justo lo que APA exige nombrar: el titulo de cada
-# tabla. Este bloque recupera esa informacion en vez de inventarla.
+# The real input contract is not just "a .md": MinerU and Docling deliver the
+# prose .md PLUS a *_content_list.json with the structure (tables with their HTML,
+# their bbox and their page) and an images/ folder with the crops of each table.
+# The .md on its own loses exactly what APA demands be named: the title of each
+# table. This block recovers that information instead of inventing it.
 #
-# Que NO se hace aqui, a proposito:
-#   - no se reordena el documento con el json (el .md manda en el orden);
-#   - no se anaden tablas que el .md no trae, porque las entradas del json con
-#     0 filas son detecciones vacias de Docling, no tablas perdidas;
-#   - no se deduce un titulo de una tabla que no lo tiene: se deja None y se
-#     pregunta, como con el resto de huecos.
+# What is NOT done here, on purpose:
+#   - the document is not reordered with the json (the .md rules on ordering);
+#   - tables that the .md does not bring are not added, because json entries with
+#     0 rows are empty detections from Docling, not lost tables;
+#   - a title is not deduced for a table that lacks one: it is left None and
+#     asked about, like with the rest of the gaps.
 
 RE_ETIQUETA_TABLA = re.compile(r"^\s*(tabla|cuadro|table)\s*[n\.#]?\s*\d*\s*[:.\-]?\s*",
                               re.I)
 
-# Quita el numero de una leyenda que ya lo trae en el .md, para que el .docx no
-# lo duplique al anteponer el suyo ("Figura 1. Figura 1. ...").
+# Removes the number from a caption that already carries it in the .md, so that the .docx
+# does not duplicate it by prepending its own ("Figura 1. Figura 1. ...").
 RE_NUM_LEYENDA = re.compile(
     r"^\s*(figura|fig|imagen|table|tabla|cuadro|chart|grafico|grafico\s*\d*)\s*"
     r"(n[.°º]?\s*)?\d+\s*[:.\)\-–]\s*", re.I)
 
 
 def _primer_texto_util(campos):
-    """Primer string no vacio de los captions/footnotes del json.
+    """First non-empty string among the captions/footnotes in the json.
 
-    OJO con la forma del dato: `table_caption` y `table_footnote` son listas de
-    strings, asi que `[e.get("table_footnote")]` seria una lista dentro de una
-    lista y ningun elemento seria un string. Se aplana a proposito, porque asi se
-    lee desde el json y asi se veria al anadirle un caption a mano.
+    CAREFUL with the shape of the data: `table_caption` and `table_footnote` are lists of
+    strings, so `[e.get("table_footnote")]` would be a list inside a list and no element
+    would be a string. It is flattened on purpose, because that is how it is
+    read from the json and how it would look if a caption were added by hand.
     """
     for c in campos or []:
         if isinstance(c, str) and c.strip():
@@ -630,8 +632,8 @@ def _primer_texto_util(campos):
 
 
 def limpiar_titulo_json(txt, whitelist, aplicar_deglue):
-    """Normaliza un titulo que viene del json (viene con la misma mugre que el
-    resto del .md: pegado, sin espacio tras ':' y a veces con una etiqueta)."""
+    """Normalizes a title coming from the json (it comes with the same dirt as the
+    rest of the .md: glued, with no space after ':' and sometimes with a label)."""
     t = unescape_md(strip_leading_markers(txt))
     if aplicar_deglue:
         t, _ = deglue(t, whitelist, True)
@@ -641,41 +643,41 @@ def limpiar_titulo_json(txt, whitelist, aplicar_deglue):
 
 
 def _firmas_tabla(filas):
-    """Huella de una tabla para emparejarla con su entrada del json: la primera
-    fila completa. Dos tablas distintas casi nunca comparten las 3 primeras
-    celdas, y ese dato sobrevive aunque el resto de la tabla se haya partido."""
+    """Fingerprint of a table to match it with its json entry: the first
+    complete row. Two different tables almost never share the first 3
+    cells, and that datum survives even if the rest of the table was split."""
     if not filas or not filas[0]:
         return ""
     return norm_key(" ".join(filas[0][:3]))
 
 
 def _entradas_tabla_json(cl):
-    """Entradas del content_list.json que son tablas CON contenido."""
+    """Entries in content_list.json that are tables WITH content."""
     out = []
     for it in cl:
         if not isinstance(it, dict) or it.get("type") != "table":
             continue
         body = it.get("table_body") or ""
         if "<td" not in body:
-            continue          # entrada vacia: deteccion sin contenido
+            continue          # empty entry: detection without content
         out.append(it)
     return out
 
 
 def resolver_tamano_pagina(md_path, docling_json, pdf, log):
-    """(ancho_pt, alto_pt, origen). El bbox del json viene en puntos de la
-    pagina, y para pasarlo a pulgadas hay que saber cuanto mide la pagina."""
+    """(width_pt, height_pt, origin). The json bbox comes in points of the
+    page, and to convert it to inches you must know how big the page is."""
     if pdf and os.path.isfile(pdf):
         try:
             import pymupdf
             d = pymupdf.open(pdf)
             r = d[0].rect
-            log("Tamano de pagina desde el PDF: %.0f x %.0f pt" % (r.width, r.height))
+            log("Page size from the PDF: %.0f x %.0f pt" % (r.width, r.height))
             return r.width, r.height, "pdf"
         except Exception as e:                      # pragma: no cover
-            log("AVISO  no se pudo leer el PDF (%s); se continua con otro metodo." % e)
+            log("WARNING  the PDF could not be read (%s); continuing with another method." % e)
 
-    # Docling guarda page_size por pagina en el *_middle.json
+    # Docling stores page_size per page in the *_middle.json
     base = docling_json or ""
     if base:
         guess = os.path.join(os.path.dirname(base), "_middle.json")
@@ -689,51 +691,51 @@ def resolver_tamano_pagina(md_path, docling_json, pdf, log):
                     for pg in d.get("pdf_info", []):
                         ps = pg.get("page_size")
                         if ps and len(ps) == 2:
-                            log("Tamano de pagina desde %s: %.0f x %.0f pt"
+                            log("Page size from %s: %.0f x %.0f pt"
                                 % (os.path.basename(c), ps[0], ps[1]))
                             return float(ps[0]), float(ps[1]), "middle.json"
                 except Exception as e:              # pragma: no cover
-                    log("AVISO  %s ilegible (%s)." % (os.path.basename(c), e))
+                    log("WARNING  %s unreadable (%s)." % (os.path.basename(c), e))
 
-    log("AVISO  no hay PDF ni middle.json: se asume Carta 612x792 pt para "
-        "convertir las cajas. Si el original era A4, las tablas quedaran un poco "
-        "estrechas; se puede forzar pasando --pdf.")
+    log("WARNING  there is no PDF nor middle.json: Letter 612x792 pt is assumed to "
+        "convert the boxes. If the original was A4, the tables will come out a bit "
+        "narrow; it can be forced by passing --pdf.")
     return 612.0, 792.0, "supuesto-carta"
 
 
 def enriquecer_desde_docling(tablas, figuras, docling_json, base_dir, md_path,
                              pdf, ancho_max, whitelist, log, aplicar_deglue=True):
-    """Completa tablas y figuras con el json de MinerU/Docling."""
+    """Completes tables and figures with the MinerU/Docling json."""
     if not docling_json:
         return {"usado": False}
 
     if not os.path.isfile(docling_json):
-        log("AVISO  no existe el json indicado: %s" % docling_json)
+        log("WARNING  the given json does not exist: %s" % docling_json)
         return {"usado": False}
 
     try:
         cl = json.loads(read_text(docling_json))
     except Exception as e:
-        log("AVISO  %s ilegible: %s" % (os.path.basename(docling_json), e))
+        log("WARNING  %s unreadable: %s" % (os.path.basename(docling_json), e))
         return {"usado": False}
 
-    log("Enriquecimiento desde %s (%d entradas)"
+    log("Enrichment from %s (%d entries)"
         % (os.path.basename(docling_json), len(cl)))
 
     ancho_pt, alto_pt, origen_pagina = resolver_tamano_pagina(
         md_path, docling_json, pdf, log)
 
     espacio = _detectar_espacio_bbox(cl, ancho_pt, alto_pt)
-    log("Espacio de coordenadas del bbox: %s%s" % (
+    log("Coordinate space of the bbox: %s%s" % (
         espacio,
-        " (normalizado 0..1000; se calibra con page_size)" if espacio == "normalizado-1000" else ""))
+        " (normalized 0..1000; calibrated with page_size)" if espacio == "normalizado-1000" else ""))
 
     jt = _entradas_tabla_json(cl)
-    log("Tablas con contenido en el json: %d (de %d entradas 'table')"
+    log("Tables with content in the json: %d (out of %d 'table' entries)"
         % (len(jt), sum(1 for x in cl if isinstance(x, dict) and x.get("type") == "table")))
 
-    # Emparejamiento por huella de la primera fila; si no cuaja, por orden, que
-    # es lo que corresponde porque ambos ficheros salen del mismo PDF.
+    # Matching by first-row fingerprint; if it does not fit, by order, which
+    # is the right thing because both files come from the same PDF.
     por_firma = {}
     for e in jt:
         f = _firmas_tabla(parse_html_table(e.get("table_body") or ""))
@@ -752,41 +754,97 @@ def enriquecer_desde_docling(tablas, figuras, docling_json, base_dir, md_path,
             _aplicar_entrada(tb, cand[0], base_dir, ancho_pt, alto_pt, ancho_max,
                              whitelist, log, aplicar_deglue, espacio, es_titulo=True)
 
-    # Las que no se pudieron emparejar por firma: se emparejan por orden, que es
-    # correcto salvo que el .md traiga subconjunto de las tablas.
+    # Those that could not be matched by fingerprint: they are matched by order, which is
+    # correct unless the .md brings only a subset of the tables.
     if orphans and jt:
         libres = [e for e in jt if id(e) not in usados][:len(orphans)]
         for tb, e in zip(orphans, libres):
             usados.add(id(e))
-            log("AVISO  la tabla de la linea %d se emparejo con la del json por "
-                "orden, no por contenido." % tb.get("linea", 0))
+            log("WARNING  the table on line %d was matched with the json one by "
+                "order, not by content." % tb.get("linea", 0))
             _aplicar_entrada(tb, e, base_dir, ancho_pt, alto_pt, ancho_max,
                              whitelist, log, aplicar_deglue, espacio, es_titulo=True)
 
-    # Figuras: MinerU/Docling solo las declaran si el documento las trae.
+    # Figures. The .md and the json may declare the SAME images:
+    #   - MinerU/Docling write "![](ruta)" in the .md and also list the
+    #     image in the json. Adding the json entry without checking would duplicate the
+    #     figure and inflate the figure index (and the verifier would claim a
+    #     "Figura N" that is not in the body).
+    #   - A .md without image markers leaves the figures to the json alone.
+    # Therefore they are first MATCHED by file name; only what has no
+    # counterpart in the .md is ADDED.
     jf = [x for x in cl if isinstance(x, dict)
           and x.get("type") in ("image", "picture", "figure")]
-    for k, e in enumerate(jf):
-        ruta = e.get("img_path") or e.get("image_path") or e.get("path")
-        if not ruta:
-            continue
-        abs_ruta = ruta if os.path.isabs(ruta) else os.path.join(base_dir, ruta)
-        if not os.path.isfile(abs_ruta):
-            log("AVISO  la figura %d apunta a %s, que no existe." % (k + 1, ruta))
-            continue
-        fig = {
-            "ruta": ruta,
-            "ruta_absoluta": abs_ruta,
-            "titulo": _primer_texto_util([e.get("caption"), e.get("text")]),
-            "nota": None,
-            "origen": "docling-json",
-            "linea": e.get("page_idx"),
-        }
-        _medir(fig, e.get("bbox"), ancho_pt, alto_pt, ancho_max, espacio, es_figura=True)
-        figuras.append(fig)
-
+    emparejadas = 0
+    anadidas = 0
+    ignoradas = 0
     if jf:
-        log("Figuras declaradas por el json: %d" % len(figuras))
+        por_nombre = {}
+        for f in figuras:
+            for clave in (f.get("ruta"), f.get("ruta_absoluta")):
+                nom = _norm_ref_imagen(clave)
+                if nom:
+                    por_nombre.setdefault(nom, f)
+
+        pendientes = []
+        for k, e in enumerate(jf):
+            ruta = e.get("img_path") or e.get("image_path") or e.get("path")
+            if not ruta:
+                continue
+            abs_ruta = ruta if os.path.isabs(ruta) else os.path.join(base_dir, ruta)
+            if not os.path.isfile(abs_ruta):
+                log("WARNING  figure %d points to %s, which does not exist." % (k + 1, ruta))
+                continue
+            objetivo = por_nombre.get(_norm_ref_imagen(ruta))
+            if objetivo is None:
+                pendientes.append((e, ruta, abs_ruta))
+                continue
+            _medir(objetivo, e.get("bbox"), ancho_pt, alto_pt, ancho_max, espacio, es_figura=True)
+            if not objetivo.get("titulo"):
+                cap = _primer_texto_util([e.get("caption"), e.get("text")])
+                if cap:
+                    objetivo["titulo"] = cap
+            objetivo["origen_medida"] = "docling-json"
+            emparejadas += 1
+
+        # Those that did not match by name: if the .md declared figures, they are matched
+        # by order (same source PDF) and the leftovers are ignored. They are only
+        # added to the body when the .md declared NO figure at all (pure Docling
+        # case, .md without ![]() markers).
+        if pendientes:
+            if not figuras:
+                for e, ruta, abs_ruta in pendientes:
+                    fig = {
+                        "ruta": ruta,
+                        "ruta_absoluta": abs_ruta,
+                        "titulo": _primer_texto_util([e.get("caption"), e.get("text")]),
+                        "nota": None,
+                        "origen": "docling-json",
+                        "linea": e.get("page_idx"),
+                    }
+                    _medir(fig, e.get("bbox"), ancho_pt, alto_pt, ancho_max, espacio, es_figura=True)
+                    fig["origen_medida"] = "docling-json"
+                    # `analizar` already numbered its figures; the ones from the json arrive
+                    # afterwards and must be given indice/existe or the inventory
+                    # blows up with KeyError.
+                    fig["indice"] = len(figuras) + 1
+                    fig["existe"] = os.path.isfile(abs_ruta)
+                    figuras.append(fig)
+                    anadidas += 1
+            else:
+                libres = [f for f in figuras if not f.get("origen_medida")]
+                for (e, ruta, abs_ruta), f in zip(pendientes, libres):
+                    _medir(f, e.get("bbox"), ancho_pt, alto_pt, ancho_max, espacio, es_figura=True)
+                    if not f.get("titulo"):
+                        cap = _primer_texto_util([e.get("caption"), e.get("text")])
+                        if cap:
+                            f["titulo"] = cap
+                    f["origen_medida"] = "docling-json"
+                    emparejadas += 1
+                ignoradas = max(0, len(pendientes) - len(libres))
+
+        log("Figures from the json: %d (matched: %d, added: %d, ignored: %d)"
+            % (len(jf), emparejadas, anadidas, ignoradas))
 
     return {
         "usado": True,
@@ -797,6 +855,9 @@ def enriquecer_desde_docling(tablas, figuras, docling_json, base_dir, md_path,
         "ancho_max_tabla_in": ancho_max,
         "tablas_json": len(jt),
         "tablas_enriquecidas": len(tablas) - len(orphans) if orphans else len(tablas),
+        "figuras_json": len(jf),
+        "figuras_emparejadas": emparejadas,
+        "figuras_anadidas": anadidas,
     }
 
 
@@ -804,21 +865,21 @@ def _aplicar_entrada(tb, e, base_dir, ancho_pt, alto_pt, ancho_max, whitelist,
                      log, aplicar_deglue, espacio, es_titulo=True):
     cap = _primer_texto_util([e.get("table_caption")])
     foot = _primer_texto_util([e.get("table_footnote")])
-    # Solo el caption es titulo de la tabla. El footnote es el texto que va DEBAJO
-    # de ella, y en la practica MinerU le pone ahi el encabezado de la seccion que
-    # agrupa varias tablas ("EJERCICIO 2: ..."), no el nombre de la tabla: usarlo
-    # como titulo inventaria un nombre que el documento no tiene. Se guarda como
-    # nota, que es lo que es.
+    # Only the caption is the table title. The footnote is the text that goes BELOW
+    # it, and in practice MinerU puts there the heading of the section that
+    # groups several tables ("EJERCICIO 2: ..."), not the table name: using it
+    # as a title would invent a name the document does not have. It is stored as a
+    # note, which is what it is.
     if es_titulo and not tb.get("titulo"):
         limpio = limpiar_titulo_json(cap, whitelist, aplicar_deglue) if cap else None
         if limpio:
             tb["titulo"] = limpio
             tb["titulo_origen"] = "json"
-            log("Titulo de la tabla (linea %d) tomado del json: %s"
+            log("Table title (line %d) taken from the json: %s"
                 % (tb.get("linea", 0), limpio[:60]))
         else:
-            log("El json no trae caption para la tabla de la linea %d; se pregunta "
-                "al usuario." % tb.get("linea", 0))
+            log("The json brings no caption for the table on line %d; the user is "
+                "asked." % tb.get("linea", 0))
     if foot and not tb.get("nota"):
         nota = limpiar_titulo_json(foot, whitelist, aplicar_deglue)
         if nota:
@@ -837,17 +898,17 @@ def _aplicar_entrada(tb, e, base_dir, ancho_pt, alto_pt, ancho_max, whitelist,
 
 
 def _detectar_espacio_bbox(entradas, ancho_pt, alto_pt):
-    """MinerU/Docling no siempre guardan el bbox en la misma unidad.
+    """    MinerU/Docling do not always store the bbox in the same unit.
 
-    En `content_list.json` el bbox viene NORMALIZADO a 0..1000 en cada eje
-    (comprobado contra `middle.json`, que si esta en puntos: los mismos bloques
-    dan 612*1.63 = 998 y 792*1.26 = 999). En `middle.json` el bbox esta en
-    puntos reales de la pagina.
+    In `content_list.json` the bbox comes NORMALIZED to 0..1000 on each axis
+    (checked against `middle.json`, which IS in points: the same blocks
+    give 612*1.63 = 998 and 792*1.26 = 999). In `middle.json` the bbox is in
+    real points of the page.
 
-    La diferencia no es academica: leida como puntos, una caja de 890 de ancho
-    son 12,4 pulgadas, mas que una hoja de 8,5, y todas las tablas saldrian
-    Deliberadamente deformadas. Se decide con los propios datos en vez de
-    suponer un formato.
+    The difference is not academic: read as points, a box of 890 wide
+    is 12.4 inches, more than an 8.5-inch sheet, and all the tables would come out
+    deliberately distorted. It is decided with the data itself instead of
+    assuming a format.
     """
     mx = my = 0.0
     for it in entradas:
@@ -870,13 +931,26 @@ def _a_pulgadas(valor, ref_pt, espacio):
         else valor / 72.0
 
 
-def _medir(obj, bbox, ancho_pt, alto_pt, ancho_max, espacio, es_figura):
-    """bbox [l, t, r, b] -> ancho/alto en pulgadas, con topes.
+def _norm_ref_imagen(valor):
+    """Normalizes an image reference to its file name.
 
-    De una tabla solo se toma el ANCHO. Su alto no sirve: cuando una tabla se
-    parte entre dos paginas, Docling guarda una entrada por fragmento, asi que
-    la altura de la caja es la del trozo de esa pagina, no la de la tabla. El
-    ancho si es fiable, y es lo unico que hace falta para no estirarla.
+    The .md and the json may cite the same image with different paths
+    ("images/fig1.png" versus "fig1.png", or "fig1.png" versus
+    "C:\\...\\fig1.png"); what identifies the figure is the base name.
+    """
+    if not valor:
+        return None
+    s = str(valor).replace("\\", "/").strip()
+    return os.path.basename(s).lower() or None
+
+
+def _medir(obj, bbox, ancho_pt, alto_pt, ancho_max, espacio, es_figura):
+    """    bbox [l, t, r, b] -> width/height in inches, with caps.
+
+    From a table only the WIDTH is taken. Its height is useless: when a table is
+    split across two pages, Docling stores one entry per fragment, so
+    the box height is that of the piece on that page, not of the table. The
+    width IS reliable, and it is the only thing needed to avoid stretching it.
     """
     if not bbox or len(bbox) < 4:
         return
@@ -896,8 +970,8 @@ def _medir(obj, bbox, ancho_pt, alto_pt, ancho_max, espacio, es_figura):
     h_in = _a_pulgadas(b - t, alto_pt, espacio)
     if h_in > 0:
         obj["alto_original_in"] = round(h_in, 3)
-        # Una figura no debería pasar de la mitad de la altura útil: 9 pulgadas
-        # de alto en medio de un cuerpo de texto no hay quien las lea.
+        # A figure should not exceed half the usable height: 9 inches
+        # tall in the middle of a body of text is unreadable.
         obj["alto_in"] = round(min(h_in, (alto_pt - 144) / 72.0), 3)
 
 
@@ -931,7 +1005,7 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             i += 1
             continue
 
-        # --- tabla HTML (puede ocupar una o varias lineas) ---------------
+        # --- HTML table (may span one or more lines) ---------------
         if t.lower().startswith("<table"):
             bloque_html = t
             j = i
@@ -949,11 +1023,11 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
                 })
                 bloques.append({"tipo": "tabla", "indice": len(tablas) - 1})
             else:
-                avisos.append("Tabla HTML sin celdas en la linea %d; se omite." % (i + 1))
+                avisos.append("HTML table without cells on line %d; it is skipped." % (i + 1))
             i = j + 1
             continue
 
-        # --- tabla markdown ---------------------------------------------
+        # --- markdown table ---------------------------------------------
         if t.startswith("|"):
             filas, nuevo = parse_md_table(lineas, i)
             if filas:
@@ -970,14 +1044,14 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             i += 1
             continue
 
-        # --- encabezado -------------------------------------------------
+        # --- heading -------------------------------------------------
         mh = RE_HEADING.match(t)
         if mh:
             nivel_md = len(mh.group(1))
             texto_h = mh.group(2).strip()
 
             if nivel_md == 1:
-                # El titulo del documento: es el titulo de la portada, no una seccion.
+                # The document title: it is the cover title, not a section.
                 portada_lineas.append({"tipo": "titulo", "texto": unescape_md(texto_h)})
                 bloques.append({"tipo": "portada", "texto": unescape_md(texto_h)})
                 i += 1
@@ -987,22 +1061,22 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             limpio = fix_colon_spacing(dedupe_numbering(limpio)).strip()
             cambios_deglue.extend(camb)
 
-            # Â¿es la seccion de referencias?
+            # Is it the references section?
             if re.search(r"referencias?\s+bibliogr", norm_key(limpio)) or norm_key(limpio).startswith("referencias"):
                 en_referencias = True
 
             mnum = RE_NUM_HEADING.match(limpio)
             if nivel_md >= 3:
-                # APA 7 tiene 5 niveles. '##' cubre los dos primeros segun este
-                # documento (numerada -> nivel 1, sin numerar -> nivel 2) y los
-                # hashes mas profundos mapean a su nivel natural. Antes TODO
-                # acababa en nivel 2, asi que un .md con '###' salia aplanado y
-                # los niveles 3, 4 y 5 no existian en la salida.
+                # APA 7 has 5 levels. '##' covers the first two according to this
+                # document (numbered -> level 1, unnumbered -> level 2) and the
+                # deeper hashes map to their natural level. Before, EVERYTHING
+                # ended up at level 2, so a .md with '###' came out flattened and
+                # levels 3, 4 and 5 did not exist in the output.
                 nivel = min(nivel_md, 5)
                 etiqueta = None
                 texto_h2 = limpio
             elif mnum:
-                # Seccion principal numerada: "3. Analisis de BSIMM" -> nivel 1
+                # Numbered main section: "3. Analisis de BSIMM" -> level 1
                 nivel = 1
                 etiqueta = mnum.group(1)
                 texto_h2 = mnum.group(2).strip()
@@ -1023,12 +1097,12 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             i += 1
             continue
 
-        # --- imagen markdown -------------------------------------------
+        # --- markdown image -------------------------------------------
         if "![" in t and "](" in t:
             mimg = RE_IMAGEN.search(t)
             if mimg:
                 alt, ruta = mimg.group(1).strip(), mimg.group(2).strip()
-                # una sola linea puede traer la imagen y su leyenda
+                # a single line can bring the image and its caption
                 cola = t[mimg.end():].strip()
                 figs = []
                 for tag, num, resto in RE_FIG_CAPTION.findall(cola):
@@ -1038,9 +1112,9 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
                     titulo = figs[0][1] or titulo
                 elif cola and not cola.startswith("|"):
                     titulo = alt or cola
-                # El .docx antepone su propio "Figura N", asi que si la leyenda
-                # del .md ya lo trae ("Figura 1. Grafico de barras") hay que quitarlo
-                # o en el PDF sale "Figura 1. Figura 1. Grafico de barras".
+                # The .docx prepends its own "Figura N", so if the caption
+                # in the .md already carries it ("Figura 1. Grafico de barras") it must be removed
+                # or the PDF shows "Figura 1. Figura 1. Grafico de barras".
                 if titulo:
                     titulo = RE_NUM_LEYENDA.sub("", titulo).strip() or None
                 figuras.append({
@@ -1054,7 +1128,7 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
                 i += 1
                 continue
 
-        # --- referencias -------------------------------------------------
+        # --- references -------------------------------------------------
         if en_referencias:
             limpia = strip_leading_markers(unescape_md(t))
             limpia = fix_colon_spacing(limpia).strip()
@@ -1063,7 +1137,7 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             i += 1
             continue
 
-        # --- portada: lineas antes de la primera seccion ----------------
+        # --- cover: lines before the first section ----------------
         if not primera_seccion_vista:
             limpia = strip_leading_markers(unescape_md(t))
             if limpia:
@@ -1072,40 +1146,40 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             i += 1
             continue
 
-        # --- parrafo / lista --------------------------------------------
+        # --- paragraph / list --------------------------------------------
         crudo = unescape_md(t)
 
-        # --- titulo APA de nivel 4 o 5 "en linea" (opt-in) ---------------
-        # APA 7 los define asi: "**Titulo.** El texto del parrafo sigue en la
-        # misma linea", con sangria de primera linea. Markdown no puede expresar
-        # esa estructura, asi que se reconoce por convencion. Es opt-in porque la
-        # negrita al abrir un parrafo es tambien texto normal corriente y
-        # activarlo sin control inundaria la TOC de titulos falsos.
+        # --- level 4 or 5 APA title "inline" (opt-in) ---------------
+        # APA 7 defines them like this: "**Titulo.** El texto del parrafo sigue en la
+        # misma linea", with first-line indent. Markdown cannot express
+        # that structure, so it is recognized by convention. It is opt-in because
+        # bold at the start of a paragraph is also plain normal text and
+        # enabling it without control would flood the TOC with fake titles.
         #
-        # Se matchea sobre el texto CRUDO a proposito: strip_leading_markers()
-        # se come los asteriscos iniciales ("**Titulo.**" -> "Titulo.") y si se
-        # detectara despues ya no habria forma de distinguirlo del texto normal.
+        # It is matched against the RAW text on purpose: strip_leading_markers()
+        # eats the leading asterisks ("**Titulo.**" -> "Titulo.") and if it were
+        # detected afterwards there would be no way to tell it from normal text.
         if detectar_en_linea and not en_referencias:
             m_en = RE_TITULO_EN_LINEA.match(crudo.strip())
             if m_en and i + 1 < n:
                 titulo_en = m_en.group(2).strip()
-                # El cuerpo es el grupo 3, NO lo que va tras m_en.end(): el
-                # grupo 3 ES el cuerpo y m_en.end() cae justo despues de el.
+                # The body is group 3, NOT what comes after m_en.end(): group 3
+                # IS the body and m_en.end() falls just after it.
                 cuerpo_en, camb = deglue(m_en.group(3).strip(), whitelist,
                                          aplicar_deglue)
                 cambios_deglue.extend(camb)
                 cuerpo_en = fix_colon_spacing(dedupe_numbering(cuerpo_en)).strip()
                 hid += 1
-                # Tres asteriscos de entrada = nivel 5; dos = nivel 4.
+                # Three leading asterisks = level 5; two = level 4.
                 nivel_en = 5 if m_en.group(1) == "***" else 4
                 bloques.append({
                     "tipo": "h", "hid": hid,
                     "nivel": nivel_en,
                     "texto": titulo_en,
                     "en_linea": cuerpo_en,
-                    # Los segmentos los resuelve el parser y no el .docx: el
-                    # analisis de markdown en linea (negrita, cursiva, codigo)
-                    # tiene una sola implementacion.
+                    # The segments are resolved by the parser and not by the .docx: the
+                    # inline markdown analysis (bold, italic, code)
+                    # has a single implementation.
                     "en_linea_segmentos": parse_inline(cuerpo_en),
                     "segmentos": parse_inline(titulo_en),
                 })
@@ -1124,7 +1198,7 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
         limpia = fix_colon_spacing(dedupe_numbering(limpia)).strip()
 
         if limpia:
-            # conservar el marcador de lista si lo hay
+            # keep the list marker if there is one
             mnum_item = re.match(r"^(\d+[\.\)]|[" + BULLET_CHARS + r"])\s+", limpia)
             bloques.append({
                 "tipo": "lista" if mnum_item else "p",
@@ -1134,10 +1208,10 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             })
         i += 1
 
-    # --- leyendas de tabla: pueden ir ANTES o DESPUES de la tabla ---------
-    # Docling y MinerU no coinciden: uno las emite antes del <table> y el otro
-    # despues. Se aceptan ambos ordenes en una pasada posterior, que es mas
-    # fiable que decidirlo durante el recorrido linea a linea.
+    # --- table captions: they may come BEFORE or AFTER the table ---------
+    # Docling and MinerU do not agree: one emits them before the <table> and the other
+    # after. Both orders are accepted in a later pass, which is more
+    # reliable than deciding it during the line-by-line walkthrough.
     for k, b in enumerate(bloques):
         if b.get("tipo") != "p" or "segmentos" not in b:
             continue
@@ -1145,10 +1219,10 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
         mt = RE_TAB_CAPTION.match(texto)
         if not mt:
             continue
-        # tabla justo despues
+        # table right after
         if k + 1 < len(bloques) and bloques[k + 1].get("tipo") == "tabla":
             destino = bloques[k + 1]["indice"]
-        # tabla justo antes
+        # table right before
         elif k > 0 and bloques[k - 1].get("tipo") == "tabla":
             destino = bloques[k - 1]["indice"]
         else:
@@ -1159,12 +1233,12 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             b["indice"] = destino
             b.pop("segmentos", None)
 
-    # --- numeracion de tablas y figuras ---------------------------------
+    # --- table and figure numbering ---------------------------------
     for k, tb in enumerate(tablas):
         tb["indice"] = k + 1
         if not tb["titulo"]:
-            avisos.append("La tabla %d no trae titulo en el .md: hay que redactarlo o "
-                          "preguntar al usuario." % (k + 1))
+            avisos.append("Table %d brings no title in the .md: it must be drafted or "
+                          "the user must be asked." % (k + 1))
     for k, fg in enumerate(figuras):
         fg["indice"] = k + 1
         ruta_abs = fg["ruta"]
@@ -1173,13 +1247,13 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
         fg["ruta_absoluta"] = os.path.normpath(ruta_abs)
         fg["existe"] = os.path.isfile(fg["ruta_absoluta"])
         if not fg["existe"]:
-            avisos.append("La figura %d apunta a '%s', que no existe en disco. La "
-                          "imagen NO se insertara." % (k + 1, fg["ruta"]))
+            avisos.append("Figure %d points to '%s', which does not exist on disk. The "
+                          "image will NOT be inserted." % (k + 1, fg["ruta"]))
         if not fg["titulo"]:
-            avisos.append("La figura %d no trae leyenda en el .md: hay que redactarla o "
-                          "preguntar al usuario." % (k + 1))
+            avisos.append("Figure %d brings no caption in the .md: it must be drafted or "
+                          "the user must be asked." % (k + 1))
 
-    # --- cursivas propuestas en las referencias -------------------------
+    # --- italics proposed for the references -------------------------
     for ref in referencias:
         rango, tipo = propose_reference_italics(ref["texto"])
         if rango:
@@ -1188,28 +1262,28 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
         else:
             ref["cursiva_propuesta"] = None
             ref["tipo_heuristica"] = None
-            ref["aviso"] = "no se pudo determinar la parte en cursiva (%s)" % tipo
+            ref["aviso"] = "the italic part could not be determined (%s)" % tipo
         ref["cursiva_confirmada"] = ref["cursiva_propuesta"]
         ref["revisar_cursiva"] = True
     if referencias:
         avisos.append(
-            "Las %d referencias vienen del .md y su parte en cursiva es una PROPUESTA "
-            "heuristica: hay que revisarlas una a una antes de entregar "
-            "(references/normas-apa7.md, seccion Referencias)." % len(referencias))
+            "The %d references come from the .md and their italic part is a heuristic "
+            "PROPOSAL: they must be reviewed one by one before delivery "
+            "(references/apa7-format.md, section Referencias)." % len(referencias))
 
-    # --- titulos duplicados --------------------------------------------
+    # --- duplicate titles --------------------------------------------
     dups = {k: v for k, v in dup_titulos.items() if len(v) > 1}
     if dups:
         lista = "; ".join(sorted({v[0] for v in dups.values()}))
-        avisos.append("Hay %d titulos de seccion repetidos en el documento (%s). La TOC "
-                      "los mostrara tal cual: preguntar al usuario si quiere "
-                      "distinguirlos o renombrarlos." % (len(dups), lista))
+        avisos.append("There are %d repeated section titles in the document (%s). The TOC "
+                      "will show them as they are: ask the user whether they want them "
+                      "distinguished or renamed." % (len(dups), lista))
 
-    # --- residuos de pegado que el deglue NO puede resolver ---------------
-    # El caso 'SegunelMarcoBSIMM' uni dos palabras MINUSCULAS, asi que la regla
-    # minuscula+M mayuscula no las ve. Adivinar donde va cada espacio exigiria un
-    # diccionario del idioma: es mas honesto reportar el residuo y que el agente
-    # lo corrija en el .md de origen en vez de producir texto corrupto.
+    # --- glued-word residues the deglue CANNOT resolve ---------------
+    # The 'SegunelMarcoBSIMM' case joined two LOWERCASE words, so the
+    # lowercase+uppercase rule does not see them. Guessing where each space goes would
+    # require a language dictionary: it is more honest to report the residue and let the agent
+    # fix it in the source .md instead of producing corrupted text.
     PEGADO_RE = re.compile(r"[A-Za-z\u00c0-\u00ff]{18,}")
     residuos = {}
     for b in bloques:
@@ -1219,26 +1293,26 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
         for m in PEGADO_RE.finditer(txt):
             if " " in m.group(0):
                 continue
-            # los terminos de la lista blanca son largamente pegados por diseÃ±o
+            # whitelisted terms are long and glued BY DESIGN
             if any(w.lower() in m.group(0).lower() for w in whitelist if len(w) >= 8):
                 continue
             residuos[m.group(0)] = residuos.get(m.group(0), 0) + 1
     if residuos:
-        # Se ordenan por longitud decreciente, no por frecuencia: un tramo de 40
-        # caracteres pegados es mucho mas sospechoso que uno de 20, y la palabra
-        # larga y valida ("internacionalmente") es el falso positivo tipico.
-        # Subir el umbral de PEGADO_RE para evitarlo perderia de verdad 29
-        # residuos reales del documento de referencia, que es peor canje.
+        # They are sorted by decreasing length, not by frequency: a stretch of 40
+        # glued characters is far more suspicious than one of 20, and a long valid
+        # word ("internacionalmente") is the typical false positive.
+        # Raising the PEGADO_RE threshold to avoid it would really lose 29
+        # genuine residues from the reference document, which is a worse trade.
         top = sorted(residuos.items(), key=lambda kv: (-len(kv[0]), -kv[1]))[:12]
         avisos.append(
-            "Hay %d tramos sin espacios que el deglue no puede separar con "
-            "confianza (pegado de palabras en minuscula). NO se corrigieron "
-            "automaticamente: revisarlos en el .md de origen. Entre los mas "
-            "largos (puede alguno ser una palabra valida sin espacios): %s"
+            "There are %d spaceless stretches that the deglue cannot separate with "
+            "confidence (glued lowercase words). They were NOT fixed "
+            "automatically: review them in the source .md. Among the longest "
+            "(could any of them be a valid word without spaces?): %s"
             % (len(residuos), ", ".join("%s (x%d)" % (t, c) for t, c in top)))
-        preguntas_residuo = ["Revisar en el .md: '%s' (x%d, %d caracteres). Si es "
-                             "una palabra pegada, separarla; si es una palabra "
-                             "valida, dejarla."
+        preguntas_residuo = ["Review in the .md: '%s' (x%d, %d characters). If it is "
+                             "a glued word, split it; if it is a valid "
+                             "word, leave it."
                              % (t, c, len(t)) for t, c in top]
     else:
         preguntas_residuo = []
@@ -1259,7 +1333,7 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
 
 
 # ---------------------------------------------------------------------------
-# Portada: deteccion automatica + huecos que hay que preguntar
+# Cover: automatic detection + gaps that must be asked about
 # ---------------------------------------------------------------------------
 
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
@@ -1267,7 +1341,7 @@ MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
 
 
 def _es_nombre_persona(txt):
-    """'Nombre Apellido Segundo' -> True. Exige 2 o mas palabras capitalizadas."""
+    """'Nombre Apellido Segundo' -> True. Requires 2 or more capitalized words."""
     if not txt or re.search(r"\d{1,2}\s+de\s+[a-z]", txt, re.I):
         return False
     if re.search(r"facultad|vicerrector|profesor|docente|nrc|universidad|corporaci", txt, re.I):
@@ -1284,10 +1358,10 @@ def _es_nombre_persona(txt):
 
 def detectar_portada(lineas, overrides):
     """
-    Intenta deducir los campos de portada del .md. Lo que no se deduzca
-    NO se inventa: se lista en 'campos_faltantes' para que el agente pregunte.
+    Tries to infer the cover fields from the .md. Whatever cannot be inferred
+    is NOT invented: it is listed in 'campos_faltantes' so that the agent asks.
 
-    Formato tipico en documentos MinerU/Docling de trabajos academicos:
+    Typical format in MinerU/Docling documents of academic works:
         # Titulo del trabajo
         Nombre Apellido, Nombre Apellido
         NRC: 00000000
@@ -1296,8 +1370,8 @@ def detectar_portada(lineas, overrides):
             <sede / unidad academica>
         <dia> de <mes> de <ano>
 
-    Los campos institucionales (facultad, sede, NRC) se detectan por patron y
-    son opcionales: si el documento no los trae, se preguntan. Nunca se inventan.
+    The institutional fields (facultad, sede, NRC) are detected by pattern and
+    are optional: if the document does not bring them, they are asked about. They are never invented.
     """
     portada = {
         "titulo": None,
@@ -1320,7 +1394,7 @@ def detectar_portada(lineas, overrides):
 
         mn = RE_NRC.search(txt)
         if mn and not portada["materia_nrc"]:
-            # 'Nombre Apellido Segundo NRC: 00000000' -> autor + NRC separados
+            # 'Nombre Apellido Segundo NRC: 00000000' -> author + NRC separated
             resto = RE_NRC.sub("", txt).strip(" :-â€“,")
             portada["materia_nrc"] = "NRC " + mn.group(1)
             if _es_nombre_persona(resto):
@@ -1336,7 +1410,7 @@ def detectar_portada(lineas, overrides):
                 portada["docente_titulo"] = partes[1]
             continue
 
-        # La linea de institucion suele traer facultad + vicerrectoria + sede.
+        # The institution line usually brings facultad + vicerrectoria + sede.
         if re.search(r"facultad|vicerrector|universidad|corporaci\u00f3n", txt, re.I):
             if not portada["vicerrectoria"] and re.search(r"vicerrector", txt, re.I):
                 m = re.search(r"vicerrector\u00eda[^,]*", txt, re.I)
@@ -1364,16 +1438,16 @@ def detectar_portada(lineas, overrides):
         if not portada["autores"] and _es_nombre_persona(txt):
             portada["autores"] = [txt]
 
-    # el overrides del usuario (lo que respondio al preguntar) manda siempre
+    # the user's overrides (what they answered when asked) always win
     for k, v in (overrides or {}).items():
         if v not in (None, "", []):
             portada[k] = v
 
-    # 'autores' es el unico campo de portada que es lista. Si el usuario lo
-    # entrega como cadena, meterla tal cual haria que build-docx.js la recorriera
-    # caracter a caracter y la portada saldria con una letra por linea. Se
-    # respeta literalmente lo escrito (no se parte por 'y' ni por comas: eso
-    # seria inventar autores). Para uno por linea, pasar un array JSON.
+    # 'autores' is the only cover field that is a list. If the user delivers
+    # it as a string, storing it verbatim would make build-docx.js walk it
+    # character by character and the cover would come out with one letter per line. What
+    # was written is respected literally (it is not split on 'y' nor on commas: that
+    # would be inventing authors). For one per line, pass a JSON array.
     if isinstance(portada.get("autores"), str):
         _a = portada["autores"].strip()
         portada["autores"] = [_a] if _a else []
@@ -1393,14 +1467,14 @@ def detectar_portada(lineas, overrides):
         if not portada.get(campo):
             faltan.append(campo)
 
-    # El titulo profesional del docente SIEMPRE se pregunta (regla de la skill),
-    # aunque el resto de la portada este completo.
+    # The professional title of the docente is ALWAYS asked about (skill rule),
+    # even if the rest of the cover is complete.
     if not portada.get("docente_titulo"):
         faltan.append("docente_titulo")
 
-    # El logo tambien se pregunta SIEMPRE. Es opcional en cuanto al resultado,
-    # pero no se puede omitir en silencio: sin esta linea el generador no tiene
-    # forma de distinguir "el usuario no tiene logo" de "a nadie le preguntamos".
+    # The logo is also ALWAYS asked about. It is optional as to the result,
+    # but it cannot be omitted silently: without this line the generator has no
+    # way of telling "the user has no logo" from "we asked nobody".
     if not portada.get("logo"):
         faltan.append("logo")
 
@@ -1414,36 +1488,36 @@ def detectar_portada(lineas, overrides):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Convierte un .md en MANIFIEST.json")
-    ap.add_argument("--md", required=True, help="ruta del .md fuente")
-    ap.add_argument("--out", required=True, help="ruta del MANIFIEST.json a escribir")
-    ap.add_argument("--log", help="fichero de log del analisis")
-    ap.add_argument("--base-dir", help="directorio base para resolver rutas de imagenes")
-    ap.add_argument("--imagenes", help="imagenes.json de calcular_tamano_imagenes.py")
-    ap.add_argument("--portada", help="portada.json con las respuestas del usuario")
-    ap.add_argument("--whitelist", help="fichero extra de terminos intocables")
-    ap.add_argument("--sin-deglue", action="store_true", help="no separar palabras pegadas")
-    ap.add_argument("--titulos-tabla-json", help="JSON {indice: titulo} del agente")
-    ap.add_argument("--titulos-figura-json", help="JSON {indice: titulo} del agente")
+    ap = argparse.ArgumentParser(description="Converts a .md into MANIFEST.json")
+    ap.add_argument("--md", required=True, help="path of the source .md")
+    ap.add_argument("--out", required=True, help="path of the MANIFEST.json to write")
+    ap.add_argument("--log", help="log file of the analysis")
+    ap.add_argument("--base-dir", help="base directory to resolve image paths")
+
+    ap.add_argument("--portada", help="portada.json with the user's answers")
+    ap.add_argument("--whitelist", help="extra file of untouchable terms")
+    ap.add_argument("--sin-deglue", action="store_true", help="do not split glued words")
+    ap.add_argument("--titulos-tabla-json", help="JSON {index: title} from the agent")
+    ap.add_argument("--titulos-figura-json", help="JSON {index: title} from the agent")
     ap.add_argument("--notas-tabla-json",
-                    help="JSON {indice: nota} del agente; por defecto 'Elaboracion propia'")
+                    help="JSON {index: note} from the agent; default 'Elaboracion propia'")
     ap.add_argument("--notas-figura-json",
-                    help="JSON {indice: nota} del agente; por defecto 'Elaboracion propia'")
+                    help="JSON {index: note} from the agent; default 'Elaboracion propia'")
     ap.add_argument("--detectar-niveles-en-linea", action="store_true",
-                    help="tratar un parrafo que empieza por '**Texto.**' como titulo "
-                         "de nivel 4 y '***Texto.***' como nivel 5 (APA 7 en linea). "
-                         "Opt-in: sin la opcion, negrita al abrir parrafo es texto normal. "
-                         "Desactivado por defecto porque genera falsos positivos.")
+                    help="treat a paragraph starting with '**Texto.**' as a level 4 title "
+                         "and '***Texto.***' as level 5 (APA 7 inline). "
+                         "Opt-in: without the option, bold at the start of a paragraph is normal text. "
+                         "Disabled by default because it generates false positives.")
     ap.add_argument("--sin-indice-tablas", action="store_true")
     ap.add_argument("--sin-indice-figuras", action="store_true")
     ap.add_argument("--docling-json", dest="docling_json",
-                    help="content_list.json de MinerU/Docling para completar titulos, "
-                         "cajas (bbox) e imagenes de tabla. Si se omite se busca solo "
-                         "el <nombre>_content_list.json junto al .md")
-    ap.add_argument("--pdf", help="PDF original: da el tamano de pagina real para "
-                                  "convertir bbox en pulgadas")
+                    help="content_list.json from MinerU/Docling to complete titles, "
+                         "boxes (bbox) and table images. If omitted, only "
+                         "<name>_content_list.json next to the .md is searched")
+    ap.add_argument("--pdf", help="original PDF: it gives the real page size to "
+                                  "convert bbox into inches")
     ap.add_argument("--ancho-max-tabla", type=float, default=6.5,
-                    help="ancho util en pulgadas (Letter con margenes de 1 pulgada)")
+                    help="usable width in inches (Letter with 1-inch margins)")
     args = ap.parse_args()
 
     log_lines = []
@@ -1454,29 +1528,29 @@ def main():
         print(line)
 
     if not os.path.isfile(args.md):
-        print("ERROR: no existe el .md: %s" % args.md, file=sys.stderr)
+        print("ERROR: the .md does not exist: %s" % args.md, file=sys.stderr)
         return 2
 
     base_dir = args.base_dir or os.path.dirname(os.path.abspath(args.md))
     whitelist = cargar_whitelist(args.whitelist)
 
-    log("=== FASE 1: analisis del .md ===")
-    log("Fuente        : %s" % args.md)
-    log("sha256        : %s" % sha256_of(args.md))
-    log("Tamano        : %d bytes" % os.path.getsize(args.md))
-    log("Dir base      : %s" % base_dir)
-    log("Terminos en lista blanca: %d" % len(whitelist))
+    log("=== PHASE 1: .md analysis ===")
+    log("Source       : %s" % args.md)
+    log("sha256       : %s" % sha256_of(args.md))
+    log("Size         : %d bytes" % os.path.getsize(args.md))
+    log("Base dir     : %s" % base_dir)
+    log("Terms in whitelist: %d" % len(whitelist))
     log("")
 
-    # MinerU/Docling entregan el .md de prosa junto a un *_content_list.json con la
-    # estructura. Si esta a mano, se usa solo: es el caso normal de esos flujos.
+    # MinerU/Docling deliver the prose .md next to a *_content_list.json with the
+    # structure. If it is at hand it is used alone: that is the normal case for those flows.
     docling_json = args.docling_json
     if docling_json is None:
         raiz = os.path.splitext(os.path.abspath(args.md))[0]
         for cand in (raiz + "_content_list.json", raiz + "_content_list_v2.json"):
             if os.path.isfile(cand):
                 docling_json = cand
-                log("Json de MinerU/Docling detectado solo: %s" % os.path.basename(cand))
+                log("MinerU/Docling json detected on its own: %s" % os.path.basename(cand))
                 break
 
     res = analizar(args.md, base_dir, whitelist, log,
@@ -1491,16 +1565,16 @@ def main():
             aplicar_deglue=not args.sin_deglue)
         log("")
 
-    log("--- Inventario ---")
-    log("Secciones (encabezados) : %d" % len(res["secciones"]))
-    log("Tablas                  : %d" % len(res["tablas"]))
-    log("Figuras                 : %d" % len(res["figuras"]))
-    log("Referencias             : %d" % len(res["referencias"]))
-    log("Lineas de portada       : %d" % len(res["portada_lineas"]))
+    log("--- Inventory ---")
+    log("Sections (headings)  : %d" % len(res["secciones"]))
+    log("Tables               : %d" % len(res["tablas"]))
+    log("Figures              : %d" % len(res["figuras"]))
+    log("References           : %d" % len(res["referencias"]))
+    log("Cover lines          : %d" % len(res["portada_lineas"]))
     log("")
 
     if res["cambios_deglue"]:
-        log("--- Correccion de palabras pegadas (%d cambios) ---" % len(res["cambios_deglue"]))
+        log("--- Glued words correction (%d changes) ---" % len(res["cambios_deglue"]))
         vistos = set()
         for tipo, antes, despues in res["cambios_deglue"]:
             clave = (antes, despues)
@@ -1510,50 +1584,50 @@ def main():
             log("  %-9s %-34s -> %s" % (tipo, antes, despues))
         log("")
 
-    log("--- Secciones detectadas ---")
+    log("--- Detected sections ---")
     for s in res["secciones"]:
         log("  H%-5d [n%d] %s" % (s["hid"], s["nivel"], s["texto"][:88]))
     log("")
 
-    log("--- Tablas detectadas ---")
+    log("--- Detected tables ---")
     for tb in res["tablas"]:
-        log("  Tabla %-2d %d filas x %d cols  titulo=%s  (linea %d, %s)"
+        log("  Table %-2d %d rows x %d cols  title=%s  (line %d, %s)"
             % (tb["indice"], len(tb["filas"]), len(tb["filas"][0]),
-               (tb["titulo"] or "SIN TITULO"), tb["linea"], tb["origen"]))
+               (tb["titulo"] or "NO TITLE"), tb["linea"], tb["origen"]))
     log("")
 
     if res["figuras"]:
-        log("--- Figuras detectadas ---")
+        log("--- Detected figures ---")
         for fg in res["figuras"]:
-            log("  Figura %-2d %s  existe=%s  titulo=%s"
-                % (fg["indice"], fg["ruta"], fg["existe"], (fg["titulo"] or "SIN TITULO")))
+            log("  Figure %-2d %s  exists=%s  title=%s"
+                % (fg["indice"], fg["ruta"], fg["existe"], (fg["titulo"] or "NO TITLE")))
         log("")
 
     if res["referencias"]:
-        log("--- Referencias detectadas (orden alfabetico se aplica en el .docx) ---")
+        log("--- Detected references (alphabetical order is applied in the .docx) ---")
         for ref in res["referencias"]:
             log("  - %s" % ref["texto"][:110])
-            log("      cursiva propuesta: %s  [%s]  REVISAR" %
+            log("      proposed italic: %s  [%s]  REVIEW" %
                 (ref["cursiva_propuesta"], ref.get("tipo_heuristica") or "?"))
         log("")
 
-    # --- titulos que aporta el agente -----------------------------------
+    # --- titles supplied by the agent -----------------------------------
     if args.titulos_tabla_json:
         tt = read_json(args.titulos_tabla_json)
         for k, v in tt.items():
             for tb in res["tablas"]:
                 if tb["indice"] == int(k):
                     tb["titulo"] = v
-        log("Titulos de tabla sobrescritos desde %s" % args.titulos_tabla_json)
+        log("Table titles overwritten from %s" % args.titulos_tabla_json)
     if args.titulos_figura_json:
         tf = read_json(args.titulos_figura_json)
         for k, v in tf.items():
             for fg in res["figuras"]:
                 if fg["indice"] == int(k):
                     fg["titulo"] = v
-        log("Titulos de figura sobrescritos desde %s" % args.titulos_figura_json)
+        log("Figure titles overwritten from %s" % args.titulos_figura_json)
 
-    # --- notas de tablas y figuras ----------------------------------------
+    # --- table and figure notes ----------------------------------------
     if args.notas_tabla_json:
         nt = read_json(args.notas_tabla_json)
         for k, v in nt.items():
@@ -1561,7 +1635,7 @@ def main():
                 if tb["indice"] == int(k):
                     tb["nota"] = v
                     tb["nota_origen"] = "agente"
-        log("Notas de tabla sobrescritas desde %s" % args.notas_tabla_json)
+        log("Table notes overwritten from %s" % args.notas_tabla_json)
     if args.notas_figura_json:
         nf = read_json(args.notas_figura_json)
         for k, v in nf.items():
@@ -1569,13 +1643,13 @@ def main():
                 if fg["indice"] == int(k):
                     fg["nota"] = v
                     fg["nota_origen"] = "agente"
-        log("Notas de figura sobrescritas desde %s" % args.notas_figura_json)
+        log("Figure notes overwritten from %s" % args.notas_figura_json)
 
-    # references/normas-apa7.md: "Por defecto 'Nota. Elaboracion propia.',
-    # salvo que el .md indique otra fuente". Ese default es obligatorio porque
-    # una tabla o figura sin nota no cumple APA. Antes solo se imprimia la nota
-    # si el .md o el json la traian, de modo que en un documento corriente no
-    # salia ninguna y el verificador no lo detectaba: se entregaba sin ella.
+    # references/apa7-format.md: "Por defecto 'Nota. Elaboracion propia.',
+    # salvo que el .md indique otra fuente". That default is mandatory because
+    # a table or figure without a note does not comply with APA. Before the note was only printed
+    # if the .md or the json brought it, so in an ordinary document none appeared and the verifier did not
+    # detect it: it was delivered without one.
     NOTA_PROPIA = "Elaboración propia"
     for tb in res["tablas"]:
         if not tb.get("nota"):
@@ -1592,71 +1666,46 @@ def main():
         overrides = read_json(args.portada)
     portada = detectar_portada(res["portada_lineas"], overrides)
 
-    log("--- Portada detectada ---")
+    log("--- Detected cover ---")
     for k in ("titulo", "autores", "facultad", "vicerrectoria", "materia_nrc",
               "docente", "docente_titulo", "fecha", "logo"):
         log("  %-15s : %s" % (k, portada.get(k)))
-    log("  CAMPOS FALTANTES (preguntar al usuario, NO inferir): %s"
-        % (", ".join(portada["campos_faltantes"]) or "(ninguno)"))
+    log("  MISSING FIELDS (ask the user, do NOT infer): %s"
+        % (", ".join(portada["campos_faltantes"]) or "(none)"))
     log("")
 
-    # --- tamanos de imagen ----------------------------------------------
-    if args.imagenes and os.path.isfile(args.imagenes):
-        imgs = read_json(args.imagenes)
-        log("--- Tamanos de imagen recibidos (%d) ---" % len(imgs))
-        by_path = {}
-        for it in imgs:
-            by_path[norm_key(os.path.basename(it.get("ruta", "")))] = it
-        for fg in res["figuras"]:
-            clave = norm_key(os.path.basename(fg["ruta"]))
-            hit = by_path.get(clave)
-            if hit:
-                fg["ancho_in"] = hit.get("ancho_in")
-                fg["alto_in"] = hit.get("alto_in")
-                log("  Figura %-2d %-46s -> %.2f x %.2f in"
-                    % (fg["indice"], os.path.basename(fg["ruta"]),
-                       hit.get("ancho_in", 0), hit.get("alto_in", 0)))
-            else:
-                fg["ancho_in"] = 6.5
-                fg["alto_in"] = None
-                avisos_fg = "sin medida en imagenes.json: se usa el ancho de contenido"
-                fg["aviso_medida"] = avisos_fg
-                log("  Figura %-2d %-46s -> SIN MEDIDA (ancho por defecto 6.5 in)"
-                    % (fg["indice"], os.path.basename(fg["ruta"])))
-        log("")
-
-    # --- politica de indices --------------------------------------------
+    # --- index policy --------------------------------------------
     hay_tablas = len(res["tablas"]) > 0
     hay_figuras = len(res["figuras"]) > 0
     idx_tablas = hay_tablas and not args.sin_indice_tablas
     idx_figuras = hay_figuras and not args.sin_indice_figuras
 
-    log("--- Politica de indices ---")
-    log("  Tabla de contenido : SIEMPRE")
-    log("  Indice de tablas  : %s (tablas encontradas: %d)"
-        % ("SI" if idx_tablas else "NO", len(res["tablas"])))
-    log("  Indice de figuras : %s (figuras encontradas: %d)"
-        % ("SI" if idx_figuras else "NO", len(res["figuras"])))
+    log("--- Index policy ---")
+    log("  Table of contents : ALWAYS")
+    log("  Table index       : %s (tables found: %d)"
+        % ("YES" if idx_tablas else "NO", len(res["tablas"])))
+    log("  Figure index      : %s (figures found: %d)"
+        % ("YES" if idx_figuras else "NO", len(res["figuras"])))
     if not idx_tablas:
-        log("  -> Sin tablas en el .md. PREGUNTAR al usuario si el documento no tiene tablas,")
-        log("     y NO generar un indice de tablas vacio.")
+        log("  -> No tables in the .md. ASK the user whether the document has no tables,")
+        log("     and do NOT generate an empty table index.")
     if not idx_figuras:
-        log("  -> Sin figuras en el .md. PREGUNTAR al usuario si el documento no tiene figuras,")
-        log("     y NO generar un indice de figuras vacio.")
+        log("  -> No figures in the .md. ASK the user whether the document has no figures,")
+        log("     and do NOT generate an empty figure index.")
     log("")
 
-    # --- avisos ----------------------------------------------------------
+    # --- warnings ----------------------------------------------------------
     if res["avisos"]:
-        log("--- Avisos (%d) ---" % len(res["avisos"]))
+        log("--- Warnings (%d) ---" % len(res["avisos"]))
         for a in res["avisos"]:
             log("  * %s" % a)
         log("")
 
-    # --- preguntas al usuario ---------------------------------------------
-    # Cada pregunta declara si BLOQUEA la entrega. Las bloqueantes no se
-    # resuelven inventando: se preguntan y el documento no se entrega hasta que
-    # el usuario responda. Antes eran cadenas sueltas en el log, sin forma de
-    # distinguirlas de un aviso, y el documento salia con "(sin titulo)".
+    # --- questions for the user ---------------------------------------------
+    # Each question declares whether it BLOCKS delivery. Blocking ones are not
+    # resolved by inventing: they are asked, and the document is not delivered until
+    # the user answers. Before they were loose strings in the log, with no way of
+    # telling them from a warning, and the document came out with "(sin titulo)".
     preguntas = []
 
     def preguntar(pid, bloqueante, campo, tipo, objetivo, indice, texto,
@@ -1673,87 +1722,87 @@ def main():
             "como_resolver": como_resolver,
         })
 
-    # Campos de portada que se PREGUNTAN pero NO bloquean: el documento se
-    # construye igual sin ellos. Es coherente con los avisos (critico=False) que
-    # emite verificar-pdf.py por los mismos dos campos.
+    # Cover fields that are ASKED about but do NOT block: the document is
+    # built just fine without them. This is consistent with the warnings (critico=False) that
+    # verificar-pdf.py emits for the same two fields.
     PORTADA_SIN_BLOQUEAR = {"logo", "docente_titulo"}
     PREGUNTA_PORTADA = {
-        "logo": ("No hay logo en la portada. Si lo aporta se coloca encima del "
-                 "titulo. ¿Se incluye o se omite?"),
-        "docente_titulo": "¿Cual es el titulo o profesion del docente?",
+        "logo": ("There is no logo on the cover. If one is provided it is placed above the "
+                 "title. Is it included or omitted?"),
+        "docente_titulo": "What is the title or profession of the docente?",
     }
 
     for c in portada["campos_faltantes"]:
         preguntar("portada_%s" % c, c not in PORTADA_SIN_BLOQUEAR, c,
-                  "agregar_u_omitir", "Portada", None,
-                  PREGUNTA_PORTADA.get(c, "Falta '%s' en la portada: se agrega o se omite?" % c),
+                  "agregar_u_omitir", "Cover", None,
+                  PREGUNTA_PORTADA.get(c, "Missing '%s' on the cover: add it or omit it?" % c),
                   ["agregar", "omitir"],
-                  "Anotar la decision en portada.json y volver a ejecutar el "
-                  "parser con --portada.")
+                  "Record the decision in portada.json and run the "
+                  "parser again with --portada.")
     if not idx_tablas:
-        preguntar("sin_tablas", True, "estructura", "confirmacion", "Documento",
-                  None, "El .md no contiene tablas: confirma que el documento "
-                        "no tiene tablas.",
+        preguntar("sin_tablas", True, "estructura", "confirmacion", "Document",
+                  None, "The .md contains no tables: confirm that the document "
+                        "has no tables.",
                   ["confirmar", "falta_alguno"],
-                  "Si falta alguna tabla, revisar el .md antes de continuar.")
+                  "If a table is missing, review the .md before continuing.")
     if not idx_figuras:
-        preguntar("sin_figuras", True, "estructura", "confirmacion", "Documento",
-                  None, "El .md no contiene figuras: confirma que el documento "
-                        "no tiene figuras.",
+        preguntar("sin_figuras", True, "estructura", "confirmacion", "Document",
+                  None, "The .md contains no figures: confirm that the document "
+                        "has no figures.",
                   ["confirmar", "falta_alguno"],
-                  "Si falta alguna figura, revisar el .md antes de continuar.")
+                  "If a figure is missing, review the .md before continuing.")
 
     OPCION_TITULO = ["redactar_desde_contexto", "usuario_proporciona"]
     for tb in res["tablas"]:
         if not tb["titulo"]:
             preguntar(
                 "titulo_tabla_%d" % tb["indice"], True, "titulo",
-                "eleccion_binaria", "Tabla", tb["indice"],
-                "La Tabla %d no tiene titulo. ¿Redacto el titulo a partir del "
-                "contexto del informe, o me lo proporcionas tu?" % tb["indice"],
+                "eleccion_binaria", "Table", tb["indice"],
+                "Table %d has no title. Should I draft the title from the "
+                "report context, or will you provide it?" % tb["indice"],
                 OPCION_TITULO,
-                "Si eliges 'redactar_desde_contexto': escribir el titulo en "
-                "titulos-tabla.json como {\"%d\": \"...\"} y volver a ejecutar el "
-                "parser con --titulos-tabla-json." % tb["indice"])
+                "If you choose 'redactar_desde_contexto': write the title in "
+                "titulos-tabla.json as {\"%d\": \"...\"} and run the "
+                "parser again with --titulos-tabla-json." % tb["indice"])
     for fg in res["figuras"]:
         if not fg["titulo"]:
             preguntar(
                 "titulo_figura_%d" % fg["indice"], True, "titulo",
-                "eleccion_binaria", "Figura", fg["indice"],
-                "La Figura %d no tiene leyenda. ¿Redacto la leyenda a partir del "
-                "contexto del informe, o me la proporcionas tu?" % fg["indice"],
+                "eleccion_binaria", "Figure", fg["indice"],
+                "Figure %d has no caption. Should I draft the caption from the "
+                "report context, or will you provide it?" % fg["indice"],
                 OPCION_TITULO,
-                "Si eliges 'redactar_desde_contexto': escribir la leyenda en "
-                "titulos-figura.json como {\"%d\": \"...\"} y volver a ejecutar el "
-                "parser con --titulos-figura-json." % fg["indice"])
+                "If you choose 'redactar_desde_contexto': write the caption in "
+                "titulos-figura.json as {\"%d\": \"...\"} and run the "
+                "parser again with --titulos-figura-json." % fg["indice"])
 
     if res["referencias"]:
         preguntar("cursiva_referencias", False, "referencias", "revision",
-                  "Referencias", None,
-                  "Revisar la parte en cursiva de las %d referencias (heuristica)."
+                  "References", None,
+                  "Review the italic part of the %d references (heuristic)."
                   % len(res["referencias"]))
-    # Los residuos los detecta el analizador pero no se copiaban ni al manifiesto
-    # ni a la lista de preguntas: el agente se enteraba del problema por el
-    # console, no por la salida que realmente consume.
+    # The residues are detected by the analyzer but were copied neither to the manifest
+    # nor to the question list: the agent learned about the problem from the
+    # console, not from the output that is actually consumed.
     for n, pr in enumerate(res["preguntas_residuo"]):
         preguntar("residuo_%d" % n, False, "deglue", "revision_manual",
-                  "Palabras pegadas", None, pr)
+                  "Glued words", None, pr)
 
     preguntas_texto = [q["pregunta"] for q in preguntas]
     pendientes_bloqueantes = [q["id"] for q in preguntas if q["bloqueante"]]
 
 
-    log("--- Preguntas pendientes para el usuario (%d, %d bloqueantes) ---"
+    log("--- Questions pending for the user (%d, %d blocking) ---"
         % (len(preguntas), len(pendientes_bloqueantes)))
     for q in preguntas:
-        log("  ? [%s] %s" % ("BLOQUEA" if q["bloqueante"] else "aviso", q["pregunta"]))
+        log("  ? [%s] %s" % ("BLOCKS" if q["bloqueante"] else "warning", q["pregunta"]))
     if pendientes_bloqueantes:
         log("")
-        log("  PENDIENTES BLOQUEANTES: %s" % ", ".join(pendientes_bloqueantes))
-        log("  El documento NO se puede entregar hasta resolverlas.")
+        log("  PENDING BLOCKING: %s" % ", ".join(pendientes_bloqueantes))
+        log("  The document cannot be delivered until they are resolved.")
     log("")
 
-    # --- manifiesto ------------------------------------------------------
+    # --- manifest ------------------------------------------------------
     manifiesto = {
         "version": VERSION_MANIFIESTO,
         "generado": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1797,7 +1846,7 @@ def main():
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(manifiesto, fh, ensure_ascii=False, indent=2)
 
-    log("MANIFIEST escrito: %s (%d bytes)" % (args.out, os.path.getsize(args.out)))
+    log("MANIFEST written: %s (%d bytes)" % (args.out, os.path.getsize(args.out)))
 
     if args.log:
         log_dir = os.path.dirname(os.path.abspath(args.log))
@@ -1805,7 +1854,7 @@ def main():
             os.makedirs(log_dir, exist_ok=True)
         with open(args.log, "w", encoding="utf-8") as fh:
             fh.write("\n".join(log_lines) + "\n")
-        log("Log escrito: %s" % args.log)
+        log("Log written: %s" % args.log)
 
     return 0
 

@@ -1,24 +1,23 @@
 <#
-    comprobar-entorno.ps1 - Preflight (PASO 0) de la skill generar-pdf-apa
+    comprobar-entorno.ps1 - Preflight (STEP 0) of the generar-pdf-apa skill
 
-    Comprueba que existan TODAS las herramientas necesarias antes de tocar un
-    documento. Si algo falta, avisa y detiene el pipeline (nunca se transforma
-    un documento con herramientas incompletas).
+    Checks that ALL required tools exist before touching a document. If anything
+    is missing, it warns and stops the pipeline (a document is never transformed
+    with an incomplete environment).
 
-    Motor de PDF: LibreOffice. No se requiere Microsoft Word. Tipst NO es
-    necesario (ver references/decisiones-motor.md).
+    PDF engine: LibreOffice. Microsoft Word is not required.
 
-    Salida: una linea por herramienta, en formato parseable:
-        OK|<herramienta>|<detalle>
-        FALTA|<herramienta>|<detalle>
+    Output: one line per tool, in a parseable format:
+        OK|<tool>|<detail>
+        MISSING|<tool>|<detail>
     followed by:
-        RESULTADO: OK | FALTA
-    Codigo de salida: 0 = entorno completo, 1 = falta algo.
+        RESULT: OK | MISSING
+    Exit code: 0 = full environment, 1 = something is missing.
 
-    Este script NO contiene rutas absolutas de ninguna maquina. Todo se
-    resuelve con lib\rutas.ps1 (entorno -> PATH -> rutas tipicas del SO).
+    This script contains no absolute paths of any machine. Everything is
+    resolved with lib\rutas.ps1 (environment -> PATH -> typical OS paths).
 
-    Variables de entorno opcionales:
+    Optional environment variables:
         APA7_SOFFICE, APA7_PYTHON, APA7_WORKDIR, APA7_NODEDIR
 #>
 [CmdletBinding()]
@@ -31,8 +30,8 @@ $results = New-Object System.Collections.Generic.List[object]
 
 function Add-Result {
     param([string]$Tool, [bool]$Ok, [string]$Detail)
-    $state = if ($Ok) { 'OK' } else { 'FALTA' }
-    $results.Add([pscustomobject]@{ Estado = $state; Herramienta = $Tool; Detalle = $Detail })
+    $state = if ($Ok) { 'OK' } else { 'MISSING' }
+    $results.Add([pscustomobject]@{ State = $state; Tool = $Tool; Detail = $Detail })
     Write-Output ("{0}|{1}|{2}" -f $state, $Tool, $Detail)
 }
 
@@ -40,15 +39,15 @@ function Add-Result {
 Add-Result 'PowerShell' ($PSVersionTable.PSVersion -ge [version]'5.1') ('v' + $PSVersionTable.PSVersion)
 
 # --- Node.js ---------------------------------------------------------------
-# Se resuelve con Get-Command. Consultar $LASTEXITCODE cuando el comando NO
-# existe arrastra el valor del comando anterior y puede dar un OK falso: ese
-# era un fallo real de la version anterior de este script.
+# Resolved with Get-Command. Reading $LASTEXITCODE when the command does NOT
+# exist drags along the previous command's value and can give a false OK: that
+# was a real bug in the previous version of this script.
 $node = Get-NodeCmd
 if ($node) {
     $r = Invoke-Native -FilePath $node -Arguments @('--version')
     Add-Result 'Node.js' ($r.ExitCode -eq 0) ("$($r.First)  ($node)")
 } else {
-    Add-Result 'Node.js' $false 'no encontrado en PATH'
+    Add-Result 'Node.js' $false 'not found on PATH'
 }
 
 # --- npm -------------------------------------------------------------------
@@ -57,24 +56,23 @@ if ($npm) {
     $r = Invoke-Native -FilePath $npm -Arguments @('--version')
     Add-Result 'npm' ($r.ExitCode -eq 0) ("v$($r.First)  ($npm)")
 } else {
-    Add-Result 'npm' $false 'no encontrado en PATH'
+    Add-Result 'npm' $false 'not found on PATH'
 }
 
-# --- libreria docx (npm) ---------------------------------------------------
-# Comprobacion REAL: se pide a Node que resuelva el modulo desde el directorio
-# de trabajo. Verificar solo que existe node_modules\docx\package.json daba
-# falsos positivos cuando el modulo estaba instalado en otro sitio, y fue
-# justamente lo que rompio el pipeline (el generador lo requeria con una ruta
-# relativa distinta de la que usaba el instalador).
+# --- docx library (npm) ----------------------------------------------------
+# REAL check: Node is asked to resolve the module from the workdir. Verifying
+# only that node_modules\docx\package.json exists gave false positives when the
+# module was installed elsewhere, and that was exactly what broke the pipeline
+# (the generator required it from a different relative path than the installer).
 $nodeDir = Get-NodeDir
 $modDir = Join-Path $nodeDir 'node_modules\docx'
 if (-not (Test-Path -LiteralPath $modDir)) { $modDir = Join-Path $nodeDir 'node_modules/docx' }
 $pkgJson = Join-Path $modDir 'package.json'
 
 if (-not $node) {
-    Add-Result 'docx (npm)' $false 'no verificable: falta Node.js'
+    Add-Result 'docx (npm)' $false 'not verifiable: Node.js missing'
 } elseif (-not (Test-Path -LiteralPath $pkgJson)) {
-    Add-Result 'docx (npm)' $false "no instalado en $nodeDir (ejecute instalar-entorno.ps1)"
+    Add-Result 'docx (npm)' $false "not installed in $nodeDir (run instalar-entorno.ps1)"
 } else {
     $ver = ''
     try { $ver = (Get-Content -LiteralPath $pkgJson -Raw -Encoding UTF8 | ConvertFrom-Json).version } catch { }
@@ -85,57 +83,57 @@ if (-not $node) {
 }
 
 # --- Python + pymupdf ------------------------------------------------------
-# El venv concreto ya NO se fija dentro de la skill: se resuelve por variable
-# de entorno o por PATH. Ver references/requisitos-sistema.md.
+# The concrete venv is NOT fixed inside the skill: it is resolved by environment
+# variable or PATH. See references\system-requirements.md.
 $py = $env:APA7_PYTHON
 if (-not $py) { $py = Get-PythonPath }
 
 if (-not $py) {
-    Add-Result 'Python' $false 'no encontrado (defina APA7_PYTHON con un interprete que tenga pymupdf)'
-    Add-Result 'pymupdf' $false 'no verificable: falta Python'
+    Add-Result 'Python' $false 'not found (set APA7_PYTHON to an interpreter that has pymupdf)'
+    Add-Result 'pymupdf' $false 'not verifiable: Python missing'
 } else {
     $r = Invoke-Native -FilePath $py -Arguments @('-c', 'import sys; print(sys.version.split()[0])')
     Add-Result 'Python' ($r.ExitCode -eq 0) ("$($r.First)  ($py)")
 
     $r2 = Invoke-Native -FilePath $py -Arguments @('-c', 'import pymupdf; print(pymupdf.__version__)')
-    Add-Result 'pymupdf' ($r2.ExitCode -eq 0) ("$($r2.First)  (interprete: $py)")
+    Add-Result 'pymupdf' ($r2.ExitCode -eq 0) ("$($r2.First)  (interpreter: $py)")
 }
 
-# --- LibreOffice (motor unico de PDF) -------------------------------------
-# IMPORTANTE: se consulta la version con Invoke-Soffice, nunca con
-# `& soffice.exe --version`. soffice.exe se desprende, el hijo hereda el pipe
-# de salida y PowerShell espera indefinidamente: eso cuelga el script entero.
+# --- LibreOffice (single PDF engine) ---------------------------------------
+# IMPORTANT: the version is queried with Invoke-Soffice, never with
+# `& soffice.exe --version`. soffice.exe detaches, the child inherits the output
+# pipe and PowerShell waits indefinitely: that hangs the whole script.
 $soffice = Get-SofficePath
 if ($soffice) {
     $r = Invoke-Soffice -Arguments @('--version') -TimeoutSeconds 60
     $version = ($r.StdOut -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
     $ok = ($r.ExitCode -eq 0) -and ([string]::IsNullOrWhiteSpace($version) -eq $false)
-    if (-not $ok) { $version = 'no se pudo leer la version (ExitCode ' + $r.ExitCode + ')' }
+    if (-not $ok) { $version = 'could not read the version (ExitCode ' + $r.ExitCode + ')' }
     Add-Result 'LibreOffice' $ok ("$version  ($soffice)")
 } else {
     $cands = (Get-SofficeCandidates | Where-Object { $_ }) -join ' | '
-    if (-not $cands) { $cands = '(sin candidatos: defina APA7_SOFFICE)' }
-    Add-Result 'LibreOffice' $false "no encontrado. Buscado: $cands"
+    if (-not $cands) { $cands = '(no candidates: set APA7_SOFFICE)' }
+    Add-Result 'LibreOffice' $false "not found. Searched: $cands"
 }
 
-# --- Gestor de paquetes (necesario solo para la autoinstalacion) -----------
+# --- Package manager (only needed for the self-install) --------------------
 $pm = Get-PackageManagerCmd
 if ($pm) {
-    Add-Result 'Gestor de paquetes' $true ("$($pm.Name)  ($($pm.Path))")
+    Add-Result 'Package manager' $true ("$($pm.Name)  ($($pm.Path))")
 } else {
-    Add-Result 'Gestor de paquetes' $false 'sin winget (Windows) ni brew (macOS/Linux): la instalacion automatica no podra ejecutarse; instale a mano segun references/requisitos-sistema.md'
+    Add-Result 'Package manager' $false 'no winget (Windows) or brew (macOS/Linux): automatic installation cannot run; install by hand according to references\system-requirements.md'
 }
 
-# --- Resumen ---------------------------------------------------------------
-$missing = @($results | Where-Object { $_.Estado -eq 'FALTA' })
+# --- Summary ---------------------------------------------------------------
+$missing = @($results | Where-Object { $_.State -eq 'MISSING' })
 Write-Output ''
 if ($missing.Count -eq 0) {
-    Write-Output 'RESULTADO: OK'
-    Write-Output 'ENTORNO OK: todas las herramientas requeridas estan presentes.'
+    Write-Output 'RESULT: OK'
+    Write-Output 'ENVIRONMENT OK: all required tools are present.'
     exit 0
 } else {
-    Write-Output ('FALTAN: ' + (($missing | ForEach-Object { $_.Herramienta }) -join ', '))
-    Write-Output 'RESULTADO: FALTA'
-    Write-Output 'Ejecute scripts\instalar-entorno.ps1 para instalarlas automaticamente. Si no puede, detenga el pipeline e informe al usuario.'
+    Write-Output ('MISSING: ' + (($missing | ForEach-Object { $_.Tool }) -join ', '))
+    Write-Output 'RESULT: MISSING'
+    Write-Output 'Run scripts\instalar-entorno.ps1 to install them automatically. If that is not possible, stop the pipeline and tell the user.'
     exit 1
 }
