@@ -1,0 +1,24 @@
+# Estado generado y artefactos locales: NO versionar.
+# (La skill tiene su propio .gitignore en generar-pdf-apa/ para .work/ y node_modules)
+
+# Banco de pruebas local: fixtures, salidas .docx/.pdf y logs de cada corrida
+.pruebas/
+evaluacion/
+
+# Estado de corrida del pipeline
+_logs/
+*.log
+__pycache__/
+*.py[cod]
+
+# Salidas generadas por la skill
+*.docx
+*.pdf
+MANIFEST.json
+MANIFIEST.json
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

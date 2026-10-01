@@ -1,39 +1,93 @@
-# Requisitos del sistema (entorno obligatorio — método F2 / LibreOffice)
+# Requisitos del sistema
 
-Requisitos verificados e instalados por el **PASO 0** de la skill. Microsoft **Word NO es un requisito**.
+Herramientas que el pipeline necesita para convertir un `.md` en un `.docx` y
+despues en un `.pdf`. **Microsoft Word no es un requisito**: la conversion la
+hace LibreOffice en modo headless.
 
-## Lista literal (F2)
+Todo lo que se necesita se resuelve solo, sin rutas escritas a mano. Este
+archivo explica como se comprueba y como se ajusta si la deteccion falla.
 
-| Herramienta | Uso | Verificación | Instalación |
+## Herramientas
+
+| Herramienta | Para que se usa | Como se comprueba | Instalacion automatica |
 |---|---|---|---|
-| PowerShell 5.1+ | ejecutar scripts de la skill | `$PSVersionTable.PSVersion` | incluido en Windows |
-| Node.js LTS + npm | generar el `.docx` con la librería `docx` | `node --version` / `npm --version` | `winget install OpenJS.NodeJS.LTS` |
-| librería `docx` (npm) | construir el `.docx` (TOC, índices, tablas) | `npm ls docx` en el directorio del generador | `npm install docx@9.7.1 --no-save` en el directorio del generador |
-| venv de Docling + `pymupdf` | verificación del PDF (páginas, fuentes, índices) | `python -c "import fitz"` | `pip install pymupdf` en el venv |
-| LibreOffice | **único motor** de conversión `.docx → .pdf` | `soffice.exe --version` | `winget install TheDocumentFoundation.LibreOffice` |
+| PowerShell 5.1 o superior | ejecutar los scripts de la skill | `$PSVersionTable.PSVersion` | viene con Windows |
+| Node.js LTS | generar el `.docx` con la libreria `docx` | `node --version` | `winget install OpenJS.NodeJS.LTS` o `brew install node` |
+| libreria `docx` (npm) | construir portada, indices, tablas y figuras | se busca en el directorio de trabajo | `npm install docx@9.7.1 --no-save` |
+| Python con `pymupdf` | verificar el `.pdf` resultante | `python -c "import fitz"` | `pip install pymupdf` |
+| LibreOffice | **unico motor** de conversion `.docx` a `.pdf` | `soffice --version` | `winget install TheDocumentFoundation.LibreOffice` o `brew install --cask libreoffice` |
 
-Detalles de instalación automática: `scripts/instalar-entorno.ps1`.
+El instalador elige el gestor de paquetes disponible (`winget` en Windows,
+`brew` en macOS/Linux) y despues vuelve a ejecutar la comprobacion.
 
-## Comandos de verificación/instalación
+## Preflight
 
-- **Preflight completo** (check + reporte tabla OK/FALTA, exit 0/1):
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File "C:\Users\User\.agents\skills\generar-pdf-apa\scripts\comprobar-entorno.ps1"
-  ```
-- **Autoinstalación** de lo faltante (winget/npm/pip) y re-verificación:
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File "C:\Users\User\.agents\skills\generar-pdf-apa\scripts\instalar-entorno.ps1"
-  ```
-  Si al final el re-check no da `ENTORNO OK`, **detener y avisar** (no transformar sin entorno completo).
+Comprueba todo y devuelve codigo de salida 0 si el entorno esta completo, 1 si
+falta algo. Se ejecuta siempre antes de transformar un documento.
 
-## Ubicaciones comprometidas
+```powershell
+powershell -ExecutionPolicy Bypass -File "scripts\comprobar-entorno.ps1"
+```
 
-- Generador del `.docx` (donde debe estar `node_modules\docx`): `C:\Users\User\AppData\Local\Temp\opencode\generar-pdf-apa`.
-- venv de Docling: `C:\Users\User\Downloads\Docling\venv\Scripts\python.exe` (usa el `.exe` directo; el `activate` no persiste entre sesiones).
-- LibreOffice: `C:\Program Files\LibreOffice\program\soffice.exe` (la ruta winget estándar).
+- Si responde `ENTORNO OK`, se puede continuar.
+- Si responde con la lista `FALTAN:`, se instala lo que falte:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "scripts\instalar-entorno.ps1"
+```
+
+El instalador aplica los cambios y repite la comprobacion. Si al terminar sigue
+sin dar `ENTORNO OK`, **detenerse y avisar al usuario**: no se transforma un
+documento con el entorno incompleto, porque el fallo aparece mas tarde como un
+PDF mal formado y es mucho mas dificil de diagnosticar.
+
+## Rutas: como se resuelven
+
+Ningun script tiene una ruta absoluta escrita dentro. Todas pasan por
+`scripts/lib/rutas.ps1`, que busca en este orden:
+
+1. La variable de entorno correspondiente, si esta definida.
+2. Rutas de instalacion habituales del sistema.
+3. El `PATH`.
+
+| Variable | Que sobrescribe | Valor por defecto |
+|---|---|---|
+| `APA7_SKILL_ROOT` | raiz de la skill | la carpeta que contiene `SKILL.md` |
+| `APA7_WORKDIR` | directorio de trabajo generado | `<raiz de la skill>\.work` |
+| `APA7_NODEDIR` | donde vive `node_modules` | el directorio de trabajo |
+| `APA7_SOFFICE` | ejecutable de LibreOffice | deteccion automatica |
+| `APA7_PYTHON` | interprete Python con `pymupdf` | deteccion automatica |
+
+Ejemplo: si la libreria `docx` esta en otro sitio porque el proyecto ya tenia
+sus propias dependencias,
+
+```powershell
+$env:APA7_NODEDIR = "C:\ruta\al\proyecto\node_modules"
+```
+
+### Por que existe el directorio de trabajo
+
+La libreria `docx` se instala en un directorio propio de la skill y no junto al
+documento del usuario, para que `require('docx')` resuelva siempre sin importar
+desde donde se ejecute el generador. Por defecto ese directorio es `.work/` y
+solo contiene estado generado:
+
+- `node_modules/` con la libreria `docx`.
+- (antes tambien un perfil de LibreOffice; ya no, cada corrida crea el suyo
+  temporal junto al PDF de salida).
+
+Se regenera con `instalar-entorno.ps1` y esta en `.gitignore`. **No es codigo
+fuente y no debe editarse ni entregarse.**
 
 ## Notas operativas
 
-- `winget` necesita `Refresh-Path` tras instalar para exponer `soffice`/`node` (o invocar por ruta completa).
-- Las instalaciones requieren la ruta del **directorio del generador** por parámetro ↔ no asumas el directorio de trabajo actual para `npm install docx`; si el `docx` no está donde se ejecuta el generador, el `require('docx')` falla.
-- El soundex de `verify.py` es delta-dos y ESLint no forma parte del pipeline: lo importante es el `ENTORNO OK` del preflight y al final el PDF verificado.
+- Tras instalar con `winget` hace falta refrescar el `PATH` antes de invocar
+  `node` o `soffice`; el instalador ya lo hace, pero si se instala a mano hay que
+  reabrir la terminal.
+- El `PATH` de la sesion y el del proceso que lanza el agente son distintos: por
+  eso los scripts buscan las rutas por su cuenta y no asumen que `node` este
+  visible.
+- Si `node` esta instalado pero `docx` no, es un fallo distinto al anterior y el
+  preflight lo reporta por separado.
+- La deteccion de Python prueba varios interpretes, porque puede haber mas de uno
+  instalado y no todos tienen `pymupdf`. Se puede fijar con `APA7_PYTHON`.

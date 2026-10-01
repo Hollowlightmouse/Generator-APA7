@@ -1,0 +1,76 @@
+# Lista blanca de terminos que el deglue NO debe separar.
+#
+# Formato: un termino por linea. Las lineas que empiezan con '#' se ignoran.
+# La comparacion es SENSIBLE A MAYUSCULAS y por subcadena.
+#
+# Esta es la UNICA fuente de terminos intocables: no hay ninguna lista
+# incrustada en el codigo. Se adapta por documento, aqui, sin tocar ningun
+# script. Si el fichero no existe, el deglue funciona igual pero sin proteccion
+# adicional.
+#
+# Que protege cada entrada:
+#   - Coincidencia EXACTA: la palabra pegada es el termino ("OpenID", "SCA").
+#     Protege siempre.
+#   - Subcadena: solo si el termino es camelCase o lleva digitos ("OpenID" dentro
+#     de "OpenIDConnect", "ISO27002"). Una sigla en mayusculas NO protege por
+#     subcadena, a proposito: si lo hiciera, las pegaduras que hay que deshacer
+#     ("OWASPTop10", "SCAySBOM") quedarian intactas.
+#
+# Que NO hace falta anadir:
+#   - Siglas en MAYUSCULAS puras (OWASP, CVSS, BPMN). La regla de desglue solo
+#     parte una minuscula seguida de mayuscula, asi que ya son seguras.
+#
+# Que NO se debe anadir:
+#   - Terminos de menos de 4 caracteres (Git, CI, QA, In). Comparados por
+#     subcadena protegerian palabras sin relacion: "Di-git-al", "de-ci-sion",
+#     "c-d". Usa el nombre completo (GitLab, GitHub, CI/CD).
+#
+# Uso:
+#   python scripts\md-a-manifiesto.py --md doc.md --out MANIFEST.json ^
+#       --whitelist references\terminos-whitelist.txt
+#
+# ---------------------------------------------------------------------------
+# Ejemplo de lista para un documento de informatica. No es la lista de ningun
+# trabajo concreto: adaptala al documento que se este procesando. Todo lo que
+# el deglue parta y NO deba partirse se ve en el informe de residuos, asi que
+# se puede anadir aqui sin adivinar.
+# ---------------------------------------------------------------------------
+
+# --- Siglas de dominio ------------------------------------------------------
+# No hacen falta: las mayusculas puras ya son seguras para el deglue. Se pueden
+# dejar escritas para documentar el ambito del documento. -------------------
+# CVSS
+# OWASP
+# BPMN
+# ISO27002
+
+# --- Tecnologia y lenguajes con camelCase: NUNCA separar -------------------
+NodeJS
+Node.js
+JavaScript
+TypeScript
+PowerShell
+OpenID
+MySQL
+PostgreSQL
+MongoDB
+PowerBI
+GitLab
+GitHub
+GitFlow
+SemVer
+
+# --- Nombres que mezclan letra y digito: la regla los partiria ------------
+# IPv4
+# IPv6
+# SHA256
+# AES128
+# Base64
+# HTTP2
+# OAuth2
+
+# --- Apellidos con prefijo: la regla "minuscula+M mayuscula" los rompe ------
+# McDonald -> 'c Donald', MacArthur -> 'ac Arthur'.
+# Anade aqui los del documento, no los tuyos por defecto.
+# McDonald
+# MacArthur

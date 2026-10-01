@@ -92,7 +92,9 @@ def main():
     parser.add_argument("--ancho-contenido", type=float, default=6.5)
     args = parser.parse_args()
 
-    with open(args.json_path, "r", encoding="utf-8") as f:
+    # utf-8-sig: en Windows Set-Content -Encoding UTF8 y la mayoria de editores
+    # guardan con BOM, y json.load aborta con 'Unexpected UTF-8 BOM' sin el.
+    with open(args.json_path, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
 
     # Heurística simple para distinguir el formato:

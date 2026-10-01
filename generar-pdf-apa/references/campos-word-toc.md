@@ -1,104 +1,185 @@
-# Tabla de contenido, índice de tablas e índice de figuras (docx funcional, LibreOffice)
+# Tabla de contenido, indice de tablas e indice de figuras
 
-Lecciones aprendidas en el informe "Informe_Comparativo_SDLC" para el **pipeline LibreOffice (F2)**. La exportación final es con **LibreOffice headless**; Word ya no participa. Esta guía existe para no repetir los bugs ya resueltos.
+Como construir los indices para que queden **funcionales**, con numeros de
+pagina reales, y como exportar el resultado a PDF. Este archivo existe para no
+volver a tropezar con los fallos ya resueltos.
 
-## Regla de oro del pipeline LibreOffice
+> El nombre del archivo es historico: la conversion ya no la hace Word. El
+> motor es LibreOffice y todo lo de aqui aplica al pipeline con `docx` (npm) y
+> LibreOffice.
 
-LibreOffice calcula los números de página al abrir el documento, pero **no construye un campo `TOC` vacío desde cero** (ignora `updateFields` para eso) y **no resuelve el resultado de campos `SEQ`**. Por lo tanto:
+## La regla de oro
 
-- La **tabla de contenido** se genera como **entradas literales** (texto del título + punto suspensivo + número vía campo `PAGEREF`).
-- Las **leyendas de tablas/figuras** llevan **número literal** ("Tabla 1", no `SEQ`).
-- Los **números de página** de TOC e índices son campos `PAGEREF` reales que LibreOffice **sí resuelve** (bookmark → página). Por eso los índices quedan funcionales: si el contenido cambia de página, el número se actualiza al reabrir.
+LibreOffice recalcula los numeros de pagina al abrir el documento, pero **no
+construye un campo `TOC` vacio desde cero** (ignora la opcion de actualizar
+campos para eso) y **no resuelve los campos `SEQ`**. Por tanto:
 
-## Recetas que SÍ funcionan (docx npm 9.7.1 + LibreOffice)
+- La **tabla de contenido** se genera como **entradas literales**: el texto del
+  titulo, un tabulador con puntos y el numero de pagina mediante un campo
+  `PAGEREF`.
+- Las **leyendas de tablas y figuras** llevan **numero literal** ("Tabla 1"), no
+  un campo `SEQ`.
+- Los **numeros de pagina** de la tabla de contenido y de los indices son campos
+  `PAGEREF` reales, que LibreOffice si resuelve (bookmark -> pagina). Por eso los
+  indices quedan vivos: si el contenido se mueve de pagina, el numero se
+  actualiza al reabrir.
 
-### 1. Índice de encabezados: bookmarks en cada heading
-- Tras parsear el markdown, numera los headings (`b.hid = ++hid`, orden de aparición) y guarda `headings[] = { hid, level, text }`.
-- Envuelve el run del heading en un bookmark `_H<hid>`:
-  ```js
-  case 'h1': return para({ heading: d.HeadingLevel.HEADING_1, /* ... */ }, [new d.Bookmark({ id: '_H' + b.hid, children: [new d.TextRun({ text: b.text, bold: true, /* TNR 12 negro */ })] })]);
-  ```
-- `_H`-prefijo porque Word/LibreOffice no admiten dígitos iniciales en nombres de bookmark.
+## Recetas que funcionan
 
-### 2. Tabla de contenido literal con PAGEREF
-- La entrada usa **estilos reales TOC 1 / TOC 2** declarados en `styles.paragraphStyles` del `Document` (así LibreOffice y Word leen formato APA), más `tabStops` con puntos y el campo:
-  ```js
-  function tocEntry(entry) {
-    return para({ style: entry.level === 1 ? 'TOC1' : 'TOC2', spacing: { before: 0, after: 0, line: 480 },
-                  tabStops: [{ type: d.TabStopType.RIGHT, position: 9350, leader: d.LeaderType.DOT }],
-                  alignment: d.AlignmentType.LEFT },
-      [new d.TextRun({ text: entry.text }), new d.TextRun({ children: [new d.Tab()] }),
-       new d.SimpleField('PAGEREF _H' + entry.hid + ' \\h')]);
-  }
-  ```
-- Estilos de párrafo declarados en el documento (formato APA: TNR 12, sin negrita, negro, doble interlineado `spacing.line 480` — nota: `spacing` va dentro de **`paragraph`**, NO a nivel raíz del estilo):
-  ```js
-  features: { updateFields: true },
-  styles: {
-    default: { document: { run: { font: 'Times New Roman', size: 24 } } },
-    paragraphStyles: [
-      { id: 'TOC1', name: 'TOC 1', basedOn: 'Normal', run: { font: 'Times New Roman', size: 24, bold: false, color: '000000' }, paragraph: { spacing: { line: 480 } } },
-    ],
-  },
-  ```
-- Importante: `features: { updateFields: true }` en las opciones del `Document` hace que LibreOffice evalúe **campos existentes** al abrir (PAGEREF y similares). LibreOffice NO dedica un pase propio para ello; el DOCX generado lleva `w:updateFields`.
+### 1. Bookmarks en cada encabezado
 
-### 3. Índice de tablas/figuras: bookmark + entrada literal con PAGEREF
-- Bookmark `_Tabla<n>` alrededor del número de la leyenda y **número literal** (el pipeline LO no resuelve `SEQ`):
-  ```js
-  new d.Bookmark({ id: '_Tabla' + n, children: [new d.TextRun({ bold: true, children: ['Tabla ' + n] })] })
-  ```
-- Entrada en el índice con `PAGEREF _Tabla<n> \h`, número y título literales, tabulación derecha con puntos:
-  ```js
-  para({ spacing: { before: 0, after: 0, line: 480 }, alignment: d.AlignmentType.LEFT,
-         tabStops: [{ type: d.TabStopType.RIGHT, position: 9350, leader: d.LeaderType.DOT }] },
-    [new d.TextRun({ children: ['Tabla ' + n, '  ', title] }),
+Despues de parsear el markdown, se numera cada heading segun su orden de
+aparicion y se envuelve su run en un bookmark `_H<id>`:
+
+```js
+case 'h1': return para({ heading: d.HeadingLevel.HEADING_1, /* ... */ },
+  [new d.Bookmark({ id: '_H' + b.hid,
+     children: [new d.TextRun({ text: b.text, bold: true })] })]);
+```
+
+El prefijo `_H` es necesario porque Word y LibreOffice no admiten nombres de
+bookmark que empiecen por un digito.
+
+### 2. Entrada de tabla de contenido con PAGEREF
+
+Usa estilos de parrafo reales `TOC 1` / `TOC 2` declarados en el `Document`
+(para que LibreOffice y Word lean el formato APA) y un tabulador derecho con
+puntos:
+
+```js
+function tocEntry(entry) {
+  return para({ style: entry.level === 1 ? 'TOC1' : 'TOC2',
+                spacing: { before: 0, after: 0, line: 480 },
+                tabStops: [{ type: d.TabStopType.RIGHT, position: 9350,
+                             leader: d.LeaderType.DOT }],
+                alignment: d.AlignmentType.LEFT },
+    [new d.TextRun({ text: entry.text }),
      new d.TextRun({ children: [new d.Tab()] }),
-     new d.SimpleField('PAGEREF _Tabla' + n + ' \\h')])
-  ```
-- La leyenda ("Tabla 1" + título) va en un **mismo párrafo** con un salto de línea (`new d.TextRun({ break: 1 })`) entre el número y el título en cursiva — número y título en líneas separadas pero un solo párrafo (APA).
+     new d.SimpleField('PAGEREF _H' + entry.hid + ' \\h')]);
+}
+```
 
-### 4. Tablas con ancho explícito (bug real de LibreOffice)
-LibreOffice **no renderiza el contenido de tablas sin anchos de columna** (matriz en hoja horizontal quedó vacía / cuerpo de tablas siguiente ausente). Solución probada:
+Estilos en el documento, con `spacing` dentro de **`paragraph`** y no a nivel
+raiz del estilo (a nivel raiz la libreria falla):
+
+```js
+features: { updateFields: true },
+styles: {
+  default: { document: { run: { font: 'Times New Roman', size: 24 } } },
+  paragraphStyles: [
+    { id: 'TOC1', name: 'TOC 1', basedOn: 'Normal',
+      run: { font: 'Times New Roman', size: 24, bold: false, color: '000000' },
+      paragraph: { spacing: { line: 480 } } },
+  ],
+},
+```
+
+`features: { updateFields: true }` es lo que hace que LibreOffice evalue los
+campos existentes al abrir. No es un pase propio de LibreOffice: lo que hace es
+escribir `w:updateFields` en el `.docx`.
+
+### 3. Indice de tablas y de figuras
+
+Mismo esquema que la tabla de contenido: bookmark sobre el numero de la leyenda,
+numero y titulo literales, y `PAGEREF` para la pagina.
+
+```js
+new d.Bookmark({ id: '_Tabla' + n,
+  children: [new d.TextRun({ bold: true, children: ['Tabla ' + n] })] })
+```
+
+```js
+para({ spacing: { before: 0, after: 0, line: 480 },
+       alignment: d.AlignmentType.LEFT,
+       tabStops: [{ type: d.TabStopType.RIGHT, position: 9350,
+                    leader: d.LeaderType.DOT }] },
+  [new d.TextRun({ children: ['Tabla ' + n, '  ', title] }),
+   new d.TextRun({ children: [new d.Tab()] }),
+   new d.SimpleField('PAGEREF _Tabla' + n + ' \\h')])
+```
+
+La leyenda va en **un solo parrafo** con un salto de linea entre el numero y el
+titulo: asi el numero queda en negrita en su linea y el titulo en cursiva en la
+siguiente, que es lo que pide APA.
+
+**El indice solo se genera si hay elementos que indexar.** Si el documento no
+tiene tablas no se crea indice de tablas; si no tiene figuras, no se crea indice
+de figuras. Un indice vacio se elimina.
+
+### 4. Tablas con ancho explicito
+
+**LibreOffice no renderiza el contenido de una tabla sin anchos de columna**: la
+tabla sale vacia. Es un fallo silencioso, el `.docx` se abre bien y no aparece
+nada dentro.
+
 ```js
 new d.Table({
   rows: rowsOut,
   width: { size: usable, type: d.WidthType.DXA },
   columnWidths,
   layout: d.TableLayoutType.FIXED,
-  borders: { /* solo líneas horizontales */ },
+  borders: { /* solo lineas horizontales */ },
 })
 ```
-- `usable` = ancho útil de la sección: 12960 twips (hoja horizontal, márgenes 1440) o 9360 twips (carta vertical).
-- Primera columna más ancha (cabecera de criterios): 2160 twips (horizontal) / 1560 (vertical); el resto se reparte parejo.
-- Estándar de bordes: solo líneas horizontales (superior, inferior, `insideHorizontal`).
 
-### 5. Trampas de la librería `docx` (bug real, aplican igual en LO)
-- Si una función helper devuelve `[para]` (array con un `Paragraph`) y lo insertas como `[ helper(), tabla, nota ]`, `Array.prototype.flat()` **solo aplana 1 nivel** y deja el array anidado → se serializa como `<0/>` y **el documento no abre**. Usa spread: `[...helper(), tabla, nota]` (o `.flat(2)`).
-- `TableOfContents` del la librería no sirve en el pipeline LO: LibreOffice ignora el campo TOC vacío → usar TOC literal (receta 2). El índice de tablas manual ya lleva `line: 480` desde el generador.
-- `spacing` de un estilo de párrafo va en `paragraph.spacing` (si lo pones a nivel raíz, `docx` falla).
+- `usable` es el ancho util de la seccion segun sus margenes y orientacion.
+- La primera columna (la de criterios) suele ser mas ancha; el resto se reparte
+  parejo.
+- Bordes: solo superior, inferior e `insideHorizontal`.
 
-## Exportación a PDF con LibreOffice (método F2 — motor obligatorio)
+El ancho total sale del `bbox` de la tabla en el JSON de layout de MinerU, no de
+estimarlo a ojo.
 
-Script: `scripts/export-fase2-pdf.ps1`.
+### 5. Trampas de la libreria `docx`
 
-- Trabaja sobre **copia temporal** (`lo_copy_<PID>`) con **perfil de usuario aislado** (`lo_profile_<PID>`) por corrida:
-  ```powershell
-  & $soffice -env:UserInstallation=file:///C:/.../lo_profile_<PID> --headless --convert-to pdf:writer_pdf_Export --outdir <tmp> <docx>
-  ```
-- En Windows, `soffice.exe` con `&` **se desprende y no espera** → usa `Start-Process -PassThru -NoNewWindow -Wait -RedirectStandardError <log>` (el stderr va a `export-fase2.log`; NO lo redirijas con `2>&1 | Out-File` en PS 5.1 con `$ErrorActionPreference='Stop'`, lanza `NativeCommandError` y aborta).
-- El aviso `Could not find platform independent libraries <prefix>` (stderr) es **benigno**.
-- Rendimiento medido (Informe_Comparativo_SDLC): conversión ~11 s (F2 total ~10.8 s vs F1 Word ~11.9 s). El PDF de LibreOffice pesa ~+30% bytes frente al de Word por igual calidad (ídem ~354 KB).
-- Paginación: LibreOffice recalcula con los anchos FIXED de tabla; en el piloto quedó la misma estructura (portada/TOC/índice/5 secciones/hoja horizontal/refs) y el TOC/índice reflejan los números recién calculados. Puede haber una página de diferencia de cierre vs el artefacto resuelto por Word (contenido idéntico).
+- Si un helper devuelve `[para]` y se inserta como `[ helper(), tabla, nota ]`,
+  `Array.prototype.flat()` **solo aplana un nivel**: el array anidado se
+  serializa como `<0/>` y **el documento no abre**. Usar spread (`[...helper(),
+  tabla, nota]`) o `.flat(2)`.
+- El `TableOfContents` de la libreria no sirve aqui: LibreOffice ignora el campo
+  `TOC` vacio. Se usa la entrada literal de la receta 2.
+- `spacing` de un estilo de parrafo va en `paragraph.spacing`.
 
-## Checklist de verificación (usa pymupdf sobre el PDF resultante)
+## Exportacion a PDF con LibreOffice
 
-- [ ] Portada con todos los campos.
-- [ ] TOC: títulos TNR 12, no negrita, negro, doble interlineado y **números de página** que coinciden con las páginas reales de cada heading.
-- [ ] Índice de tablas: "Tabla N  Título…  página" con números correctos (Tabla 1 en hoja horizontal).
-- [ ] Cuerpo: tablas con contenido (especialmente la hoja horizontal, que en LO sin anchos queda vacía), notas "Elaboración propia", referencias con sangría francesa.
-- [ ] Sin páginas en blanco entre TOC e índice.
+Script: `scripts/export-pdf.ps1`. Trabaja sobre una copia temporal y crea un
+perfil de usuario aislado por corrida, para no chocar con una sesion de
+LibreOffice abierta por el usuario.
 
-## Anexo histórico — el pipeline anterior con Word COM (ya NO se usa)
+```powershell
+& $soffice.com --headless --norestore --nolockcheck --nofirststartwizard `
+    -env:UserInstallation=file:///.../lo_profile_<id> `
+    --convert-to pdf:writer_pdf_Export --outdir <tmp> <docx>
+```
 
-Antes del estándar F2 la conversión era Word COM (`ExportAsFixedFormat`, desconectado), con post-proceso COM para que el campo TOC naciera con doble interlineado TNR 12 no negrita tras `$toc.Update()`, y `SEQ Tabla` en el cuerpo. Word COM era frágil (procesos colgados, `~$*`, copia temporal obligatoria) y quedó descartado. Si algún día se mantiene Word COM, conservar las reglas: nunca exportar al mismo nombre base en el mismo directorio; trabajar sobre copia en `export-work`; actualizar campos y exportar el PDF **en sesiones de Word separadas**.
+**Como se invoca, y por que no de otra forma.** Contradecir esta parte hace
+colgar el script:
+
+- **Usar `soffice.com`, no `soffice.exe`.** El `.exe` se desprende y el proceso
+  hijo hereda el handle del pipe, asi que PowerShell se queda leyendo para
+  siempre.
+- **No usar `Start-Process`.** Si el proceso padre ya redirige la salida, la
+  redireccion anidada deja a LibreOffice sin terminar nunca.
+- **La captura es `& $bin @args 2> $fichero`**, con `$ErrorActionPreference`
+  puesto a `Continue` mientras dura la llamada y restaurado despues.
+- **Nunca `2>&1 | Out-File`** junto a `$ErrorActionPreference = 'Stop'`: PowerShell
+  lanza `NativeCommandError` y aborta.
+- Con redireccion a fichero de .NET el proceso tampoco termina (los streams
+  quedan abiertos por el hijo). Por eso se escribe a fichero con `2>`.
+- El aviso `Could not find platform independent libraries <prefix>` en stderr es
+  **benigno** y no debe tratarse como error.
+
+## Checklist de verificacion
+
+Sobre el PDF resultante:
+
+- [ ] Portada con los campos que existen; sin numero de pagina visible.
+- [ ] Tabla de contenido: numeros de pagina que coinciden con la pagina real de
+      cada titulo.
+- [ ] Indices de tablas y de figuras: entradas "Tabla N  Titulo...  pagina" con
+      el numero correcto, y solo si el documento tiene esos elementos.
+- [ ] Tablas con contenido (una pagina horizontal vacia es el sintoma del
+      problema de `columnWidths`).
+- [ ] Leyendas con numero y titulo, en parrafo unico.
+- [ ] Referencias con sangria francesa.
+- [ ] Sin paginas en blanco entre la tabla de contenido y el cuerpo.
