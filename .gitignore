@@ -1,23 +1,47 @@
-# Estado generado y artefactos locales: NO versionar.
-# (La skill tiene su propio .gitignore en generar-pdf-apa/ para .work/ y node_modules)
+# Un solo .gitignore para todo el repo. Los patrones sin barra inicial
+# aplazan a cualquier nivel, asi que las reglas cubren tambien
+# generate-apa-document/ y cualquier subcarpeta.
 
-# Banco de pruebas local: fixtures, salidas .docx/.pdf y logs de cada corrida
+# --- Estado generado por la skill (no es codigo fuente) ---------------------
+# .work/ contiene node_modules con la libreria docx.
+.work/
+# Entorno virtual de Python con pymupdf fijado: cientos de MB, lo crea
+# scripts\instalar-entorno.ps1.
+.venv/
+venv/
+
+# --- Datos de entorno y rutas locales ---------------------------------------
+# Configuracion local por maquina: nunca se versiona.
+.env
+.env.*
+*.env
+# Credenciales sueltas, por si se guardan en un archivo sin extension.
+*.key
+*.pem
+
+# Lista de terminos intocables: dato de un documento concreto, nunca del repo.
+# El deglue ya no la consume (se revisa en el .md fuente); la regla queda como
+# red de seguridad para copias locales de instalaciones viejas.
+terms-whitelist.txt
+
+# --- Banco de pruebas local -------------------------------------------------
+# Fixtures, salidas .docx/.pdf y logs de cada corrida
 .pruebas/
 evaluacion/
 
-# Estado de corrida del pipeline
+# --- Estado de corrida del pipeline ----------------------------------------
 _logs/
 *.log
 __pycache__/
 *.py[cod]
 
-# Salidas generadas por la skill
+# --- Salidas generadas por la skill -----------------------------------------
 *.docx
 *.pdf
 MANIFEST.json
 MANIFIEST.json
 
-# Editores / SO
+# --- Editores / SO ----------------------------------------------------------
 .vscode/
 .idea/
 .DS_Store

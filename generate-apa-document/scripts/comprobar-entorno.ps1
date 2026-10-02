@@ -1,5 +1,5 @@
 <#
-    comprobar-entorno.ps1 - Preflight (STEP 0) of the generar-pdf-apa skill
+    comprobar-entorno.ps1 - Preflight (STEP 0) of the generate-apa-document skill
 
     Checks that ALL required tools exist before touching a document. If anything
     is missing, it warns and stops the pipeline (a document is never transformed
@@ -79,7 +79,17 @@ if (-not $node) {
     $posixMod = $modDir.Replace('\', '/')
     $probe = "require('$posixMod'); console.log('ok')"
     $r = Invoke-Native -FilePath $node -Arguments @('-e', $probe)
-    Add-Result 'docx (npm)' ($r.ExitCode -eq 0 -and $r.First -eq 'ok') ("v$ver  ($nodeDir)")
+    $okDocx = ($r.ExitCode -eq 0 -and $r.First -eq 'ok')
+    # A version that is not the pinned one is reported INSIDE the detail, and the
+    # state stays OK: the library resolves and works, it is simply not the tested
+    # one, and the library is not MISSING. The output contract documented in the
+    # header (OK|/MISSING| + RESULT:) is intentionally left untouched.
+    $esperadoDocx = $script:APA7_DEPS['docx']
+    $notaDocx = ''
+    if ($okDocx -and $ver -and $ver -ne $esperadoDocx) {
+        $notaDocx = "  [MISMATCH: pinned $esperadoDocx]"
+    }
+    Add-Result 'docx (npm)' $okDocx ("v$ver$notaDocx  ($nodeDir)")
 }
 
 # --- Python + pymupdf ------------------------------------------------------
@@ -89,14 +99,30 @@ $py = $env:APA7_PYTHON
 if (-not $py) { $py = Get-PythonPath }
 
 if (-not $py) {
-    Add-Result 'Python' $false 'not found (set APA7_PYTHON to an interpreter that has pymupdf)'
+    # "No usable Python" has two very different causes and they need different
+    # fixes, so they are not reported the same way. A venv whose base interpreter
+    # was removed or upgraded still EXISTS but cannot run: the executable is
+    # there, so a bare "not found" sends the user to install Python, which does
+    # nothing for them.
+    $venvPath = Get-PythonVenvPath
+    if ($venvPath) {
+        Add-Result 'Python' $false "the skill's virtual environment exists but does not run: $venvPath (its base interpreter was moved, removed or upgraded). Recreate it with scripts\instalar-entorno.ps1"
+    } else {
+        Add-Result 'Python' $false 'not found (set APA7_PYTHON to an interpreter that has pymupdf)'
+    }
     Add-Result 'pymupdf' $false 'not verifiable: Python missing'
 } else {
     $r = Invoke-Native -FilePath $py -Arguments @('-c', 'import sys; print(sys.version.split()[0])')
     Add-Result 'Python' ($r.ExitCode -eq 0) ("$($r.First)  ($py)")
 
     $r2 = Invoke-Native -FilePath $py -Arguments @('-c', 'import pymupdf; print(pymupdf.__version__)')
-    Add-Result 'pymupdf' ($r2.ExitCode -eq 0) ("$($r2.First)  (interpreter: $py)")
+    $okPyMu = ($r2.ExitCode -eq 0)
+    $esperadoMu = $script:APA7_DEPS['pymupdf']
+    $notaMu = ''
+    if ($okPyMu -and $r2.First -and $r2.First -ne $esperadoMu) {
+        $notaMu = "  [MISMATCH: pinned $esperadoMu]"
+    }
+    Add-Result 'pymupdf' $okPyMu ("$($r2.First)$notaMu  (interpreter: $py)")
 }
 
 # --- LibreOffice (single PDF engine) ---------------------------------------

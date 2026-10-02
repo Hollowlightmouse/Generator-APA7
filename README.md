@@ -1,6 +1,6 @@
-# Skill `generar-pdf-apa`
+# Generate an APA 7 academic document (.docx + PDF)
 
-Builds a **Word (.docx) and PDF** academic document following the **APA 7th edition** rules, ready to submit: institutional cover page, table of contents and lists of tables/figures with real page numbers, all from a source Markdown `.md` (extracted with MinerU/Docling, for example).
+Skill `generate-apa-document`. Builds a **Word (.docx) and PDF** academic document following the **APA 7th edition** rules, ready to submit: institutional cover page, table of contents and lists of tables/figures with real page numbers, all from a source Markdown `.md` (extracted with MinerU/Docling, for example).
 
 > **Export engine: LibreOffice (headless). Microsoft Word is not required.**
 
@@ -14,7 +14,7 @@ It is not a PDF-to-Word converter: it starts from a `.md` that already exists. W
 
 - **Institutional cover page** with a 3-zone layout (title at the top, authors vertically centered, institutional block anchored at the bottom) and an optional logo only if you provide it.
 - **Table of contents always**, and **lists of tables and figures only when they exist**, with real pages via `PAGEREF` fields that update when the document is opened.
-- **Automatic correction** of conversion artifacts: glued words (`2:Diferenciaciónentre Bugs` → `2: Diferenciación entre Bugs`), duplicated list markers (`• •`, `1. 1.`), glued numbering (`ACTIVIDAD1:`), always respecting proper nouns and technical terms.
+- **Automatic correction** of conversion artifacts: glued words (`2:Diferenciaciónentre Bugs` → `2: Diferenciación entre Bugs`), duplicated list markers (`• •`, `1. 1.`), glued numbering (`ACTIVIDAD1:`). Pure UPPERCASE acronyms (`OWASP`, `CVSS`) are never touched, and **every** change is reported so a term split by mistake can be fixed in the source `.md`.
 - **References normalized to APA 7**: alphabetical order, hanging indent and italics where appropriate, even if the `.md` already brings them as a list.
 - **Wide tables on an occasional landscape page** (allowed by APA 7) for comparison matrices that do not fit in portrait.
 - **Final verification with `pymupdf`** before delivering: cover, indices, captions, landscape pages, notes and references.
@@ -33,26 +33,26 @@ It is not a PDF-to-Word converter: it starts from a `.md` that already exists. W
 
 The skill validates these tools automatically before touching the document (**STEP 0 / preflight**). If any is missing, it installs it; if something cannot be installed, it **stops and warns** without transforming the document.
 
-Tool paths overridable by environment variable: `APA7_SOFFICE`, `APA7_PYTHON`, `APA7_NODEDIR`, `APA7_WORKDIR`, `APA7_SKILL_ROOT`. Details in [`generar-pdf-apa/references/system-requirements.md`](generar-pdf-apa/references/system-requirements.md).
+Tool paths overridable by environment variable: `APA7_SOFFICE`, `APA7_PYTHON`, `APA7_NODEDIR`, `APA7_WORKDIR`, `APA7_SKILL_ROOT`. Details in [`generate-apa-document/references/system-requirements.md`](generate-apa-document/references/system-requirements.md).
 
 ## Installation
 
-1. **Copy the** `generar-pdf-apa/` **folder** into your AI agent's skills directory, so that `SKILL.md` ends up at the root of the skills directory. For example: `<your-user>\.agents\skills\generar-pdf-apa`.
+1. **Copy the** `generate-apa-document/` **folder** into your AI agent's skills directory, so that `SKILL.md` ends up at the root of the skills directory. For example: `<your-user>\.agents\skills\generate-apa-document`.
 2. **The environment sets itself up.** The first time, run the preflight:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File "...\generar-pdf-apa\scripts\comprobar-entorno.ps1"
+   powershell -ExecutionPolicy Bypass -File "...\generate-apa-document\scripts\comprobar-entorno.ps1"
    ```
 
    If it returns `RESULT: MISSING`, the automatic installer resolves it and re-checks:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File "...\generar-pdf-apa\scripts\instalar-entorno.ps1"
+   powershell -ExecutionPolicy Bypass -File "...\generate-apa-document\scripts\instalar-entorno.ps1"
    ```
 
    > Do not install anything by hand and do not transform documents with missing tools.
 
-The `docx` dependency is installed in `generar-pdf-apa/.work/node_modules`, inside the skill itself: that way `require('docx')` always resolves, no matter where it is run from. That folder is generated state and is in `.gitignore`.
+The `docx` dependency is installed in `generate-apa-document/.work/node_modules`, inside the skill itself: that way `require('docx')` always resolves, no matter where it is run from. That folder is generated state and is in `.gitignore`.
 
 ## How to use it
 
@@ -117,22 +117,21 @@ Activation
 - **Automatic per-table orientation:** a table that does not fit in portrait (6 or more columns, or very long cells) moves on its own to a **landscape page** with its title and note; afterwards the text returns to portrait. The criterion is legibility, not the number of rows.
 - **Figure note above the image; table note below the table** (APA 7 distinguishes them by position, not only by text).
 - **Clean export:** the resolved `soffice` binary is invoked directly (not via `Start-Process`), with an isolated LibreOffice profile per run and a temporary copy; the `Could not find platform independent libraries <prefix>` message on stderr is benign and ignored.
-- **No embedded whitelists:** the terms the deglue must not split live only in `references/terms-whitelist.txt`.
+- **No embedded term lists:** the pipeline ships no whitelist of untouchable terms, because that data belongs to one concrete document and not to the tool. A camelCase term split by the deglue (`NodeJS` → `Node JS`) is corrected in the source `.md`; the residue report lists every stretch it could not separate.
 
 ## Repository structure
 
 ```
 Generator-APA7/
+├── .gitignore                           # single ignore file: generated state, env data
 ├── README.md
-└── generar-pdf-apa/
+└── generate-apa-document/
     ├── SKILL.md                          # skill definition (activation, workflow, rules)
-    ├── .gitignore                        # excludes generated state (.work, __pycache__)
     ├── references/
     │   ├── apa7-format.md                # APA 7 formatting rules
     │   ├── institutional-cover.md        # 3-zone cover layout
     │   ├── word-toc-fields.md            # functional TOC/indices and docx/LibreOffice pitfalls
-    │   ├── system-requirements.md        # tools, preflight and path resolution
-    │   └── terms-whitelist.txt           # untouchable terms for the deglue
+    │   └── system-requirements.md        # tools, preflight and path resolution
     ├── scripts/
     │   ├── comprobar-entorno.ps1         # environment preflight (STEP 0)
     │   ├── instalar-entorno.ps1          # auto-install of what is missing
@@ -142,7 +141,8 @@ Generator-APA7/
     │   ├── verificar-pdf.py              # .pdf verification (pymupdf)
     │   └── lib/
     │       └── rutas.ps1                 # portable path and tool resolution
-    └── .work/                            # generated state (docx's node_modules)
+    ├── .work/                            # generated state (docx's node_modules)
+    └── .venv/                            # generated state (pinned pymupdf)
 ```
 
 ## Limitations
@@ -154,4 +154,4 @@ Generator-APA7/
 
 ---
 
-*Skill `generar-pdf-apa` — APA 7 academic document (.docx + PDF) without depending on Microsoft Word.*
+*Skill `generate-apa-document` — APA 7 academic document (.docx + PDF) without depending on Microsoft Word.*

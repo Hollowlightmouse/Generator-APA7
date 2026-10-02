@@ -111,6 +111,22 @@ try {
         }
     }
     if ($r.LogDir) { Write-Log ("LibreOffice trace in: {0}" -f $r.LogDir) }
+
+    # A timeout is reported BEFORE the "was the PDF produced?" check, otherwise a
+    # wedged LibreOffice is diagnosed as a missing output file, which is a
+    # different problem with a different fix.
+    if ($r.TimedOut) {
+        Write-Log ("LibreOffice did not finish within {0} s and was killed (ExitCode 124)." -f $Timeout) 'FAIL'
+        Write-Log 'The conversion was aborted, not failed silently. Raise -Timeout, or check' 'FAIL'
+        Write-Log 'whether a previous soffice process is stuck, and retry.' 'FAIL'
+        $sofficeVivos = Get-Process -Name 'soffice', 'soffice.bin' -ErrorAction SilentlyContinue
+        if ($sofficeVivos) {
+            Stop-ProcessTree -Ids $sofficeVivos.Id
+            Write-Log ("Killed {0} leftover LibreOffice process(es) from the aborted run." -f $sofficeVivos.Count) 'WARN'
+        }
+        exit 1
+    }
+
     if (-not (Test-Path -LiteralPath $expected)) {
         Write-Log "The expected PDF was not produced: $expected" 'FAIL'
         exit 1
@@ -126,8 +142,10 @@ catch {
     $code = 1
 }
 finally {
-    Get-Process -Name 'soffice', 'soffice.bin' -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
+    # The tree, not just the launcher: a soffice.bin child survives a flat kill
+    # and then makes the NEXT --convert-to fail. Same reason as line 84 above.
+    $restantes = Get-Process -Name 'soffice', 'soffice.bin' -ErrorAction SilentlyContinue
+    if ($restantes) { Stop-ProcessTree -Ids $restantes.Id }
 
     # The isolated LibreOffice profile is only useful during the conversion: it
     # is thousands of files and, if left behind, thousands of directories pile up

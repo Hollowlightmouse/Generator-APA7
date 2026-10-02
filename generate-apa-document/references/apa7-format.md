@@ -133,15 +133,17 @@ automatically, but it is worth reviewing them while reading the `.md`.
 
 - Pure uppercase acronyms (`OWASP`, `CVSS`, `BPMN`): the rule requires lowercase
   followed by uppercase, so they are already safe.
-- camelCase names (`NodeJS`, `OpenID`, `MySQL`) and those that mix letters and
-  digits (`IPv6`, `SHA256`). These **cannot** be distinguished by pattern, so
-  they are in `terms-whitelist.txt`, which is passed with `--whitelist`.
-- Surnames with a prefix (`McDonald`, `MacArthur`): add the specific surname to
-  `terms-whitelist.txt` if it breaks.
+- Nothing else, and that is a deliberate limit. camelCase names (`NodeJS`,
+  `OpenID`, `MySQL`) and those mixing letters and digits (`IPv6`, `SHA256`)
+  cannot be told apart from a real gluing by pattern, and the pipeline carries
+  **no list of untouchable terms**: that data belongs to one concrete document,
+  not to the tool. Prefixed surnames (`McDonald`, `MacArthur`) fall in the same
+  case.
 
 The un-gluing is never silent: **everything that changes is recorded** and can
-be reviewed before building the `.docx`. If a term was split that should not
-have been, it is added to the whitelist file and it is run again.
+be reviewed before building the `.docx`. A term split that should not have been
+(`NodeJS` → `Node JS`) is corrected in the source `.md` and the parser is run
+again.
 
 ## References
 

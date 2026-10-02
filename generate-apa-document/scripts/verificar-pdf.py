@@ -40,7 +40,7 @@ from datetime import datetime
 
 try:
     import pymupdf
-except ImportError:  # python <3.13 exposes the same package as 'fitz'
+except ImportError:  # pymupdf < 1.24.3 published the same module as 'fitz'
     import fitz as pymupdf
 
 PT_PULGADA = 72.0

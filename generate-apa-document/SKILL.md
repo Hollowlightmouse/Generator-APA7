@@ -1,5 +1,5 @@
 ---
-name: generar-pdf-apa
+name: generate-apa-document
 description: Builds or structures an academic Word (.docx) and PDF document following APA 7th edition, from a source Markdown (.md) file, its images and the layout JSON files (content_list, content_list_v2, middle, model) that carry figure size and position. ALWAYS USE when the user asks to assemble or produce an academic APA document or PDF, formalize a paper, set it up with an institutional cover page, table of contents, list of tables, list of figures and APA references, or apply APA formatting to a text. Activation is by INTENT, not keywords: "generate the APA PDF", "armá mi trabajo en formato APA", "estructura este informe con norma APA", "pasame esto a APA con portada y referencias" all apply. Also use when required data is missing and the user must be asked before continuing. Exports the PDF with headless LibreOffice and does NOT require Microsoft Word. DO NOT USE if the user only wants to read, summarize, translate or spell-check a text.
 ---
 
@@ -65,6 +65,15 @@ The preflight prints one line per tool: `OK|<tool>|<detail>` or
 - `RESULT: MISSING` → run `powershell -ExecutionPolicy Bypass -File "scripts\instalar-entorno.ps1"`, which installs what is missing (winget/brew, npm, pip) and re-checks.
 
 If something is still missing after installing, **stop and tell the user**: never transform a document with an incomplete environment. Details in `references/system-requirements.md`.
+
+A version that differs from the pin is **not** a failure: the line stays `OK` and
+the mismatch is written into its detail (`[MISMATCH: pinned …]`). Only a genuinely
+missing tool produces `MISSING` and exit code 1.
+
+`docx` (npm) and `pymupdf` are pinned in `$APA7_DEPS` in `scripts/lib/rutas.ps1`.
+`pymupdf` is a compiled library, so it is **not** installed into the system Python:
+the installer creates `<skill>\.venv` and installs it there, and every script uses
+that interpreter. If `.venv` is missing or broken it is recreated automatically.
 
 ## STEP 0.5 — Mandatory questions (cannot be skipped)
 
@@ -169,9 +178,9 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 - **Inventory of tables/figures**: the TOC always; lists of tables and figures only if they exist. If the analysis does not find them, **ask** before assuming.
 - Format: letter size and APA 7th edition margins, with no extra institutional rules.
 - References: always normalized to APA format.
-- Glued words: always fixed (missing spaces, "2:Word", "ACTIVIDAD1:"), respecting proper nouns and technical terms protected by `references/terms-whitelist.txt`.
+- Glued words: always fixed (missing spaces, "2:Word", "ACTIVIDAD1:"). Pure UPPERCASE acronyms (`OWASP`, `CVSS`) are never split, because the rule needs lowercase followed by uppercase.
 - Cover author list: comma-separated, with "y" before the last one, regardless of count. `autores` accepts `"Nombre Apellido y Nombre Apellido"` or `["Nombre Apellido", "Nombre Apellido"]`; the text is kept as-is, not split.
-- **Extending the whitelist is part of the job.** The list carries generic terms, not the document's proper nouns. The stretches the deglue cannot split with confidence (brand or project names glued to the rest of the sentence) come out in the review queue: review them by hand in the `.md` and, those that are a real term, **add them to `references/terms-whitelist.txt` and re-run the parser**. Without that step the deglue splits brands over terms nobody protects.
+- **Reviewing the deglue is part of the job.** There is no list of untouchable terms: the pipeline carries no data about a document it has not read. Two queues come out of the analysis and both are answered in the source `.md`: the recorded **changes** (what the deglue split) and the **residue report** (stretches of glued characters it could not separate with confidence, typically brand or project names stuck to the sentence). Fix a real term in the `.md` and re-run the parser. Never patch the generated `.docx` by hand.
 
 ## Skill files
 
@@ -182,12 +191,12 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 | `references/institutional-cover.md` | 3-zone cover layout, fields, and what to do when information is missing. |
 | `references/word-toc-fields.md` | How to make the TOC and the indices functional (`PAGEREF`, `updateFields`), `docx` library pitfalls, and how to invoke LibreOffice without hanging it. |
 | `references/system-requirements.md` | Requirements, preflight, installation and path resolution. |
-| `references/terms-whitelist.txt` | Untouchable terms for the deglue. **Single source**: there is no list embedded in the code. |
-| `scripts/md-a-manifiesto.py` | `.md` + layout JSON → `MANIFEST.json`. Enriches, deduplicates, deglues, computes sizes (from the JSON `bbox` when present), applies the default note and leaves the blocking questions in `diagnostico`. Flags: `--md`, `--out`, `--log`, `--base-dir`, `--portada`, `--whitelist`, `--sin-deglue`, `--titulos-tabla-json`, `--titulos-figura-json`, `--notas-tabla-json`, `--notas-figura-json`, `--detectar-niveles-en-linea`, `--sin-indice-tablas`, `--sin-indice-figuras`, `--docling-json`, `--pdf`, `--ancho-max-tabla` (run with `--help` for the full list). |
+| `scripts/md-a-manifiesto.py` | `.md` + layout JSON → `MANIFEST.json`. Enriches, deduplicates, deglues, computes sizes (from the JSON `bbox` when present), applies the default note and leaves the blocking questions in `diagnostico`. Flags: `--md`, `--out`, `--log`, `--base-dir`, `--portada`, `--sin-deglue`, `--titulos-tabla-json`, `--titulos-figura-json`, `--notas-tabla-json`, `--notas-figura-json`, `--detectar-niveles-en-linea`, `--sin-indice-tablas`, `--sin-indice-figuras`, `--docling-json`, `--pdf`, `--ancho-max-tabla` (run with `--help` for the full list). |
 | `scripts/build-docx.js` | `MANIFEST.json` → `.docx` (cover, indices, tables, figures, references). Splits the body into sections and moves tables that do not fit in portrait to a landscape page. **Aborts with code 4 if a title or caption is missing.** |
 | `scripts/export-pdf.ps1` | `.docx` → `.pdf` with headless LibreOffice. |
 | `scripts/verificar-pdf.py` | Verifies the `.pdf` (pymupdf): cover, indices, captions, indents, table notes below and figure notes above the image. |
-| `scripts/lib/rutas.ps1` | Portable resolution of paths, Python, Node and LibreOffice. |
+| `scripts/lib/rutas.ps1` | Portable resolution of paths, Python, Node and LibreOffice, plus the `$APA7_DEPS` version pins. |
 | `scripts/comprobar-entorno.ps1` | STEP 0 preflight. |
-| `scripts/instalar-entorno.ps1` | Installs what is missing and re-checks. |
+| `scripts/instalar-entorno.ps1` | Installs what is missing and re-checks. Supports `-WhatIf` and `-Only <tool>`. |
 | `.work/` | Generated state: `docx`'s `node_modules`. Not source code; it is regenerated by `instalar-entorno.ps1`. |
+| `.venv/` | Generated state: the Python virtual environment holding the pinned `pymupdf`. Not source code; it is regenerated by `instalar-entorno.ps1`. |

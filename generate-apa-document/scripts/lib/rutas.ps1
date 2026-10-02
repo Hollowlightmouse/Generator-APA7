@@ -1,4 +1,4 @@
-# lib/rutas.ps1 - Path discovery for the generar-pdf-apa skill
+# lib/rutas.ps1 - Path discovery for the generate-apa-document skill
 #
 # GOLDEN RULE: this file contains NO absolute path of any specific machine.
 # Everything is resolved at runtime from:
@@ -19,6 +19,22 @@
 # would pollute the scope of the loading script and abort with errors such as
 # "cannot retrieve $IsMacOS" on PowerShell 5.1, where that variable does not
 # exist. Platform detection uses Test-Path and Get-Variable.
+
+# ---------------------------------------------------------------------------
+# Pinned versions of the libraries this skill's own code talks to
+# ---------------------------------------------------------------------------
+# ONE place for both. They used to be literal strings inside instalar-entorno.ps1
+# (the log line and the npm command, four lines apart) with nothing ever checking
+# them, so the pin was documentation rather than a restriction. The preflight
+# now compares what is installed against these values and says so in its detail.
+#
+# pymupdf is pinned because verificar-pdf.py calls its API directly. 1.28.2 is the
+# current release; above 1.24.3 the top-level module is `pymupdf` and the `fitz`
+# alias no longer exists.
+$script:APA7_DEPS = @{
+    docx    = '9.7.1'
+    pymupdf = '1.28.2'
+}
 
 # ---------------------------------------------------------------------------
 # Platform detection (compatible with PowerShell 5.1 and 7+)
@@ -62,9 +78,10 @@ function Get-SkillScript {
 function Get-WorkDir {
     if ($env:APA7_WORKDIR) { return $env:APA7_WORKDIR }
     $wd = Join-Path $script:APA7_SKILL_ROOT '.work'
-    if (-not (Test-Path -LiteralPath $wd)) {
-        New-Item -ItemType Directory -Path $wd -Force | Out-Null
-    }
+    # Plain .NET call, not New-Item: an empty workdir is scratch state and must
+    # exist even when the caller runs with -WhatIf. An empty directory installs
+    # nothing, so honouring -WhatIf here only breaks the probes that follow.
+    [void][IO.Directory]::CreateDirectory($wd)
     return $wd
 }
 
@@ -78,9 +95,9 @@ function Get-LogDir {
     <#  Log folder of a run. Created if missing.  #>
     param([string]$ForRun)
     if (-not $ForRun) { $ForRun = [IO.Path]::GetTempPath() }
-    if (-not (Test-Path -LiteralPath $ForRun)) {
-        New-Item -ItemType Directory -Path $ForRun -Force | Out-Null
-    }
+    # Same reason as Get-WorkDir: creating a log folder installs nothing, and a
+    # suppressed -WhatIf would make the run fail while trying to write its log.
+    [void][IO.Directory]::CreateDirectory($ForRun)
     return $ForRun
 }
 
@@ -148,24 +165,34 @@ function Get-SofficeConsolePath {
 
 function Invoke-Soffice {
     <#
-        Runs LibreOffice RELIABLY and bounded in time.
+        Runs LibreOffice with a REAL time bound.
 
-        Returns @{ ExitCode; StdOut; StdErr; TimedOut }
+        Returns @{ ExitCode; StdOut; StdErr; TimedOut; LaunchError; LogDir;
+                  StdOutPath; StdErrPath; ProfilePath }
 
-        Why NOT `& soffice.exe`:
-          On Windows soffice.exe detaches, the child (soffice.bin) inherits the
-          pipe handle and PowerShell keeps reading forever: it hangs the whole
-          script. The console launcher soffice.com is used instead.
+        Why the CONSOLE launcher (soffice.com), never soffice.exe:
+          soffice.exe detaches, the child (soffice.bin) inherits the output pipe
+          handle and PowerShell keeps reading forever. See
+          Get-SofficeConsolePath.
 
-        Why the output goes to FILES and not to pipes:
-          With .NET RedirectStandardOutput the LibreOffice process does not
-          finish (ExitCode 124 / timeout) because the streams stay open in the
-          child process. By redirecting to a file with Start-Process and polling
-          HasExited, the file is flushed as soon as the process ends and both
-          streams are read normally.
+        Why Start-Process redirecting to FILES, and not pipes:
+          The child never writes to a pipe, so it cannot block on a full pipe
+          buffer, and the files are complete the moment the process ends. With
+          .NET RedirectStandardOutput the streams stay open in the child and it
+          never reports a result. This is also the approach that
+          Get-SofficeConsolePath has always documented.
+
+        Why NOT `& $bin @args`: the call operator blocks with no way to bound the
+        wait. That was the actual defect being fixed here: -TimeoutSeconds was
+        accepted and then ignored, so a wedged LibreOffice hung the preflight
+        forever and TimedOut was hardcoded to $false.
+
+        On timeout the whole TREE is killed, not just the launcher: the real work
+        happens in the soffice.bin child, which would survive and keep holding
+        the output files. ExitCode 124 is the conventional "timed out" code.
 
         Never redirect with 2>&1 | Out-File next to $ErrorActionPreference='Stop':
-        PowerShell throws NativeCommandError and aborts.
+          PowerShell throws NativeCommandError and aborts.
     #>
     param(
         [string[]]$Arguments = @(),
@@ -180,7 +207,12 @@ function Invoke-Soffice {
     # an orphan apa7-lo-<pid> folder in TEMP (they accumulate indefinitely).
     $runDirTemporal = -not $LogDir
     $runDir = if ($LogDir) { $LogDir } else { Join-Path ([IO.Path]::GetTempPath()) ('apa7-lo-' + $PID) }
-    if (-not (Test-Path -LiteralPath $runDir)) { New-Item -ItemType Directory -Path $runDir -Force | Out-Null }
+    # Internal scratch, NOT an installation: it is created and deleted with plain
+    # .NET calls so that it is never suppressed by the caller's -WhatIf. If the
+    # directory is missing, LibreOffice is handed a -env:UserInstallation pointing
+    # at nothing, prints nothing on --version and the preflight wrongly reports
+    # LibreOffice as MISSING (exit code 0 and an empty version).
+    [void][IO.Directory]::CreateDirectory($runDir)
 
     # FIXED names: a run overwrites the previous one instead of leaving a new
     # pair of files behind (the old random stamp piled up one pair per call).
@@ -196,24 +228,58 @@ function Invoke-Soffice {
     $args = @('--headless', '--norestore', '--nolockcheck', '--nofirststartwizard',
         ('-env:UserInstallation=' + (ConvertTo-Apa7FileUri $profile))) + $Arguments
 
-    # Capture with `&`: stdout by assignment, stderr to a file. Do NOT use
-    # 2>&1 | Out-File (throws NativeCommandError with ErrorActionPreference Stop)
-    # nor Start-Process: if the parent process already redirects its output, the
-    # nested redirection keeps LibreOffice from ever finishing.
+    # -ArgumentList does NOT quote its elements, it just joins them with spaces.
+    # Any argument containing a space (the document path, the user profile URI)
+    # would be split by the child, so each one is quoted here.
+    $argQuoted = @($args | ForEach-Object { ConvertTo-Apa7Arg $_ })
+
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $out = & $bin @args 2> $errFile
-    $code = $LASTEXITCODE
-    $ErrorActionPreference = $prevEap
+    $proc = $null
+    $exited = $true
+    $launchError = $null
+    try {
+        # -NoNewWindow plus explicit redirection to FILES means the child writes
+        # to the files, not to this process's console: it does not inherit the
+        # caller's redirection, which is what used to keep LibreOffice running.
+        $proc = Start-Process -FilePath $bin -ArgumentList $argQuoted -NoNewWindow -PassThru `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        # Reading .Handle is what makes .ExitCode usable later. Without it,
+        # Start-Process -PassThru hands back a Process whose exit code is $null
+        # even after WaitForExit() reports success (verified against
+        # soffice.com: without this, ExitCode comes back empty, not 0).
+        $null = $proc.Handle
+        $exited = $proc.WaitForExit([Math]::Max(1000, $TimeoutSeconds * 1000))
+    } catch {
+        $launchError = $_.Exception.Message
+        $exited = $false
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
 
-    $outText = (($out | ForEach-Object { [string]$_ }) -join "`n")
-    Set-Content -LiteralPath $outFile -Value $outText -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not $exited -and $proc) {
+        try { Stop-ProcessTree -Ids @($proc.Id) } catch { }
+        try { $proc.WaitForExit(10000) | Out-Null } catch { }
+    }
+
+    if ($exited) {
+        try { $code = $proc.ExitCode } catch { $code = $null }
+        if ($null -eq $code) { $code = 0 }   # exited cleanly, code not reported
+    } elseif ($launchError) {
+        $code = 127
+    } else {
+        $code = 124
+    }
+
+    $outText = (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)
+    $errText = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
 
     $result = @{
         ExitCode   = $code
         StdOut     = $outText
-        StdErr     = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
-        TimedOut   = $false
+        StdErr     = $errText
+        TimedOut   = (-not $exited)
+        LaunchError = $launchError
         LogDir     = $runDir
         StdOutPath = $outFile
         StdErrPath = $errFile
@@ -223,7 +289,9 @@ function Invoke-Soffice {
     # We already read everything we needed. If the directory is ours (temporary),
     # it is deleted here so we do not leave garbage in TEMP.
     if ($runDirTemporal) {
-        Remove-Item -LiteralPath $runDir -Recurse -Force -ErrorAction SilentlyContinue
+        # Symmetric with the creation above: our own scratch is always cleaned up,
+        # including under -WhatIf, so a dry run does not leak apa7-lo-* folders.
+        try { [IO.Directory]::Delete($runDir, $true) } catch { }
     }
 
     return $result
@@ -302,22 +370,52 @@ function Test-SofficeStderrIsBenign {
 # ---------------------------------------------------------------------------
 # Python with pymupdf: environment -> explicit candidates -> PATH
 # ---------------------------------------------------------------------------
+function Get-PythonVenvPath {
+    <#
+        Path of the interpreter inside the skill's own virtual environment, or
+        $null when there is no venv at all. It deliberately does NOT check that
+        the interpreter RUNS: the preflight has to tell "no venv" apart from
+        "venv present but broken", because the fix is different in each case
+        (install Python vs recreate the venv).
+    #>
+    $root = $script:APA7_SKILL_ROOT
+    $subs = if (Test-Apa7IsMac) { @('venv/bin', '.venv/bin') } else { @('venv\Scripts', '.venv\Scripts') }
+    $names = if (Test-Apa7IsMac) { @('python3', 'python') } else { @('python.exe', 'python3.exe') }
+    foreach ($sub in $subs) {
+        foreach ($nm in $names) {
+            $p = Join-Path $root (Join-Path $sub $nm)
+            if (Test-Path -LiteralPath $p) { return $p }
+        }
+    }
+    return $null
+}
+
 function Get-PythonCandidates {
     $c = New-Object System.Collections.Generic.List[string]
 
+    # 1) explicit override, always wins
     if ($env:APA7_PYTHON) { $c.Add($env:APA7_PYTHON) }
 
-    # venv with conventional name inside or near the skill
+    # 2) the skill's own venv, BEFORE any interpreter on PATH. The venv carries
+    #    the pinned pymupdf, so it has to win over a system-wide one that may be
+    #    a different version. Order in this list decides which one is used.
+    $venv = Get-PythonVenvPath
+    if ($venv) { $c.Add($venv) }
+    # also probe the alternative conventional names so a venv created by hand
+    # under a different name is still found
     $root = $script:APA7_SKILL_ROOT
     if (Test-Apa7IsMac) {
-        $pyNames = @('python3', 'python')
+        $subs = @('venv/bin', 'venv/Scripts', '.venv/bin', '.venv/Scripts')
+        $pyNames = @('python3', 'python', 'python.exe')
     } else {
-        $pyNames = @('python.exe', 'python3.exe')
+        $subs = @('venv\Scripts', 'venv/bin', '.venv\Scripts', '.venv/bin')
+        $pyNames = @('python.exe', 'python3.exe', 'python3', 'python')
     }
-    foreach ($sub in @('venv\Scripts', 'venv\bin', '.venv\Scripts', '.venv\bin')) {
+    foreach ($sub in $subs) {
         foreach ($nm in $pyNames) { $c.Add((Join-Path $root (Join-Path $sub $nm))) }
     }
 
+    # 3) interpreters on PATH
     $cmd = Get-Command 'python3' -ErrorAction SilentlyContinue
     if ($cmd) { $c.Add($cmd.Source) }
     $cmd2 = Get-Command 'python' -ErrorAction SilentlyContinue

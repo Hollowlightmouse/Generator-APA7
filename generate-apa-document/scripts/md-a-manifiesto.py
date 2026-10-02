@@ -11,8 +11,8 @@ manifest is produced, and build-docx.js only applies it.
 What it fixes compared to the previous pipeline:
   * References ALWAYS come from the .md. Before they were ignored completely and
     5 fixed literal references from the sample document were emitted.
-  * The correction of "glued words" (deglue) is really implemented, with a
-    whitelist. Before it was only documented and never executed.
+  * The correction of "glued words" (deglue) is really implemented. Before it was
+    only documented and never executed.
   * Tables, figures and references are inventoried, and it is DECLARED when
     something is missing, so that build-docx.js applies the conditional index policy.
   * U+2022 bullets and Docling's "o " artifact are detected, as well as the
@@ -39,7 +39,6 @@ Agent answers (JSON {index: text}, 1-based index):
 
 Analysis options:
     --sin-deglue            do not apply the "glued words" correction
-    --whitelist FILE        untouchable terms (no base list in the code)
     --detectar-niveles-en-linea
                             treat "**Titulo.** text" as level 4 and
                             "***Titulo.*** text" as level 5 (APA 7 inline).
@@ -65,33 +64,6 @@ from datetime import datetime, timezone
 VERSION_MANIFIESTO = 1
 
 # ---------------------------------------------------------------------------
-# Whitelist of terms that are NEVER split when words get glued together.
-#
-# There is no base list in the code, on purpose: any term hardcoded here would
-# contaminate the pipeline with the domain of one concrete piece of work. A
-# document's whitelist is defined per document, in
-#   references/terms-whitelist.txt
-# and it is passed with  --whitelist <file>.
-#
-# The comparison is CASE SENSITIVE and by substring, so it is best to add the
-# term with its exact form as it appears in the .md.
-#
-# Guideline when choosing terms:
-#   - Add the ones with internal camelCase (NodeJS -> 'Node JS', MySQL ->
-#     'My SQL', OpenID -> 'Open ID') and the ones mixing letters and numbers
-#     (IPv4, SHA256, AES128 -> 'IPv 4', 'SHA 256', 'AES 128').
-#   - Pure UPPERCASE acronyms (OWASP, CVSS, SDL) do NOT need to be added: the
-#     rule only splits lowercase followed by uppercase, so they are already safe.
-#   - AVOID terms shorter than 4 characters (Git, CI, QA, In). Matched by
-#     substring they would protect unrelated words: "Di-git-al", "de-ci-sion", "c-d".
-#   - Prefixed surnames (McDonald, MacArthur), if they break, are added to the
-#     document's file; they do not go here.
-#
-# Without a whitelist the deglue may split a legitimate term. That is not a
-# silent failure: everything that changes shows up in the residue report for
-# review.
-# ---------------------------------------------------------------------------
-
 # Bullets and symbols that the conversions leave glued to the start of a line.
 BULLET_CHARS = "\u2022\u25cf\u25aa\u25e6\u2043\u2219\u00b7\u2023\u2027"
 
@@ -215,9 +187,11 @@ GLUE_ACR_RE = re.compile(
     r"([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc]{3,})"
     r"([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc][a-z\u00f1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00e0]+)")
 # 'Top10' -> 'Top 10', 'Junio2021' -> 'Junio 2021': word glued to a number.
-# The whitelist covers the cases where they are NOT split: IPv6, SHA256, Base64...
-# Hence the importance of adding to terms-whitelist.txt the terms with
-# letters and numbers from the document at hand.
+# This rule also splits legitimate mixed alphanumerics (IPv6, SHA256, Base64):
+# nothing in the pipeline keeps a list of them, and a term list would have to be
+# fed per document. The price is accepted on purpose: the residue report shows
+# every change so the term can be corrected in the source .md, which is where it
+# belongs.
 GLUE_PALABRA_NUM_RE = re.compile(
     r"([A-Za-z\u00c0-\u00ff]{3,})(\d{1,4})(?![0-9A-Za-z-])")
 # '10de' -> '10 de', '2Capa' -> '2 Capa', '3Mes5' -> '3 Mes 5': number glued to
@@ -228,7 +202,7 @@ GLUE_NUM_PALABRA_RE = re.compile(
     r"|(?:de|del|la|el|los|las|un|una|y|en|con|para|por)\b)")
 
 
-def deglue(text, whitelist, apply=True):
+def deglue(text, apply=True):
     """
     Inserts spaces in words glued together by the PDF-to-text conversion.
 
@@ -238,19 +212,15 @@ def deglue(text, whitelist, apply=True):
       'ACTIVIDAD4'                         -> 'ACTIVIDAD 4'
       '2:Diferenciacion'                   -> '2: Diferenciacion'
 
-    Why NOT to split:
-      the terms in the document's whitelist (--whitelist), which are
-      legitimate camelCase: splitting them would produce 'Node JS', which is an error
-      just as serious as not splitting anything.
-      Pure UPPERCASE acronyms ('OWASP', 'CVSS') are not touched: the rule
-      requires lowercase followed by uppercase.
+    What is NOT split:
+      Pure UPPERCASE acronyms ('OWASP', 'CVSS'): the rule requires lowercase
+      followed by uppercase, so they are already safe.
 
-    The whitelist is evaluated on the WHOLE word containing the junction point,
-    not on a context window. This is deliberate: with a context window, short
-    entries from the list ('In', 'CI', 'CD') appear inside almost any sentence and
-    would disable the correction across the whole document.
-    At word level, a protected term stays intact and 'yDatos' is split
-    just the same.
+    There is no term list protecting camelCase names ('NodeJS' -> 'Node JS').
+    That trade is deliberate: a list of untouchable terms is data of one
+    concrete document, it never belongs to the pipeline, and a generic default
+    list in the code would contaminate every other document. Every change is
+    reported, so a term wrongly split is fixed in the source .md.
 
     Returns (corrected_text, list_of_changes) so that they can be reported.
     """
@@ -258,73 +228,10 @@ def deglue(text, whitelist, apply=True):
     if not apply or not text:
         return text, cambios
 
-    # Whitelist regex, escaped and CASE SENSITIVE.
-    #
-    # Case sensitivity is not a detail: with re.I the term "Git" (version control)
-    # used to appear inside "DiGITal" and protected the whole word, and
-    # "CI" used to appear inside "deCIsion". With a case-insensitive comparison, any
-    # short acronym voids the correction in the middle of the document. Comparing with the
-    # exact uppercase, "Git" only protects "Git", "GitLab" and "GitHub".
-    if whitelist:
-        pat = "|".join(re.escape(t) for t in sorted(whitelist, key=len, reverse=True))
-        wl_re = re.compile("(?:" + pat + ")")
-        # Subset that can protect by substring. The criterion is NOT
-        # "has uppercase letters": "OWASP" and "SCA" have them and yet they are
-        # precisely the acronyms that must be splittable ("OWASPTop10",
-        # "SCAySBOM"). MIXED-case names go in ("OpenID", "JavaScript",
-        # "IPv6") and those carrying digits ("ISO27002", "MD5"), which are indeed
-        # worth protecting even when they are uppercase.
-        wl_camel = frozenset(
-            t for t in whitelist
-            if (any(c.islower() for c in t) and any(c.isupper() for c in t[1:]))
-            or (any(c.isdigit() for c in t) and any(c.isupper() for c in t))
-        )
-    else:
-        wl_re = None
-        wl_camel = frozenset()
-
-    # Maximum run of characters that can form a glued word.
-    token_chars = r"[0-9A-Za-z\u00c0-\u00ff_./\\-]"
-
-    def palabra_en(pos, longitud, cadena):
-        ini = pos
-        while ini > 0 and re.match(token_chars, cadena[ini - 1]):
-            ini -= 1
-        fin = pos + longitud
-        while fin < len(cadena) and re.match(token_chars, cadena[fin]):
-            fin += 1
-        return cadena[ini:fin]
-
-    def protegida(pos, longitud, cadena):
-        if wl_re is None:
-            return False
-        palabra = palabra_en(pos, longitud, cadena)
-        # Two protection modes, and that distinction is what makes the list
-        # useful:
-        #
-        #  1. EXACT match: the glued word IS the term ("Portal",
-        #     "SCA"). Always protects.
-        #  2. Substring: the term is INSIDE a longer glued word
-        #     ("OpenID" inside "OpenIDConnect"). Only applied to terms
-        #     in camelCase or with digits.
-        #
-        # UPPERCASE acronyms do not protect by substring on purpose:
-        # if they did, "SCA" would protect "SCAySBOM" and "OWASP" would protect
-        # "OWASPTop10", which are exactly the gluings that must be undone.
-        # The price is that a product like "OWASPJuiceShop" will have to be added
-        # whole to the whitelist; the list is editable precisely for that.
-        if palabra in whitelist:
-            return True
-        return any(t in palabra for t in wl_camel)
-
     def sub_glue(m):
         a, b = m.group(1), m.group(2)
-        if protegida(m.start(), len(m.group(0)), text):
-            return m.group(0)
         cambios.append(("glue", m.group(0), a + " " + b))
         return a + " " + b
-
-    out = GLUE_RE.sub(sub_glue, text)
 
     # The order matters. GLUE_RE goes first because it sees 'SegunelMarco'; but it splits
     # 'SCAySBOM' into 'SCAy SBOM' and afterwards there is nothing left that an acronym
@@ -332,32 +239,22 @@ def deglue(text, whitelist, apply=True):
     # are all evaluated against 'text' and chained in the inverse order
     # of application.
     def sub_sigla_y(m):
-        if protegida(m.start(), len(m.group(0)), text):
-            return m.group(0)
         cambios.append(("sigla_y", m.group(0), m.group(1) + " " + m.group(2) + " " + m.group(3)))
         return m.group(1) + " " + m.group(2) + " " + m.group(3)
 
     def sub_acr(m):
-        if protegida(m.start(), len(m.group(0)), text):
-            return m.group(0)
         cambios.append(("sigla", m.group(0), m.group(1) + " " + m.group(2)))
         return m.group(1) + " " + m.group(2)
 
     def sub_num_palabra(m):
-        if protegida(m.start(), len(m.group(0)), text):
-            return m.group(0)
         cambios.append(("num_palabra", m.group(0), m.group(0) + " "))
         return m.group(0) + " "
 
     def sub_num(m):
-        if protegida(m.start(), len(m.group(0)), text):
-            return m.group(0)
         cambios.append(("glue_num", m.group(0), m.group(1) + " " + m.group(2)))
         return m.group(1) + " " + m.group(2)
 
     def sub_palabra_num(m):
-        if protegida(m.start(), len(m.group(0)), text):
-            return m.group(0)
         cambios.append(("palabra_num", m.group(0), m.group(1) + " " + m.group(2)))
         return m.group(1) + " " + m.group(2)
 
@@ -369,20 +266,12 @@ def deglue(text, whitelist, apply=True):
     out = GLUE_RE.sub(sub_glue, out)
 
     def sub_colon(m):
-        if protegida(m.start(), len(m.group(0)), out):
-            return m.group(0)
         cambios.append(("colon", m.group(0), m.group(0) + " "))
         return m.group(0) + " "
 
     out = COLON_RE.sub(sub_colon, out)
 
     def sub_paren(m):
-        # Protect only the word BEFORE the parenthesis. If the whole
-        # match were measured, palabra_en would return the complete "Digital(Portal)" and
-        # the whitelisted term inside the parenthesis would protect the whole
-        # sentence, so this rule would not correct anything useful.
-        if protegida(m.start(), 1, out):
-            return m.group(0)
         cambios.append(("paren", m.group(0), m.group(1) + " (" + m.group(2) + ")"))
         return m.group(1) + " (" + m.group(2) + ")"
 
@@ -576,15 +465,6 @@ CAMPOS_PORTADA = [
 ]
 
 
-def cargar_whitelist(ruta_extra):
-    """Untouchable terms. They come only from the given file: there is no base in code."""
-    terms = set()
-    if ruta_extra and os.path.isfile(ruta_extra):
-        for ln in read_text(ruta_extra).splitlines():
-            ln = ln.strip()
-            if ln and not ln.startswith("#"):
-                terms.add(ln)
-    return sorted(terms, key=len, reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -631,12 +511,12 @@ def _primer_texto_util(campos):
     return None
 
 
-def limpiar_titulo_json(txt, whitelist, aplicar_deglue):
+def limpiar_titulo_json(txt, aplicar_deglue):
     """Normalizes a title coming from the json (it comes with the same dirt as the
     rest of the .md: glued, with no space after ':' and sometimes with a label)."""
     t = unescape_md(strip_leading_markers(txt))
     if aplicar_deglue:
-        t, _ = deglue(t, whitelist, True)
+        t, _ = deglue(t, True)
     t = fix_colon_spacing(t).strip()
     t = RE_ETIQUETA_TABLA.sub("", t).strip()
     return t or None
@@ -704,7 +584,7 @@ def resolver_tamano_pagina(md_path, docling_json, pdf, log):
 
 
 def enriquecer_desde_docling(tablas, figuras, docling_json, base_dir, md_path,
-                             pdf, ancho_max, whitelist, log, aplicar_deglue=True):
+                             pdf, ancho_max, log, aplicar_deglue=True):
     """Completes tables and figures with the MinerU/Docling json."""
     if not docling_json:
         return {"usado": False}
@@ -752,7 +632,7 @@ def enriquecer_desde_docling(tablas, figuras, docling_json, base_dir, md_path,
         else:
             usados.add(id(cand[0]))
             _aplicar_entrada(tb, cand[0], base_dir, ancho_pt, alto_pt, ancho_max,
-                             whitelist, log, aplicar_deglue, espacio, es_titulo=True)
+                             log, aplicar_deglue, espacio, es_titulo=True)
 
     # Those that could not be matched by fingerprint: they are matched by order, which is
     # correct unless the .md brings only a subset of the tables.
@@ -763,7 +643,7 @@ def enriquecer_desde_docling(tablas, figuras, docling_json, base_dir, md_path,
             log("WARNING  the table on line %d was matched with the json one by "
                 "order, not by content." % tb.get("linea", 0))
             _aplicar_entrada(tb, e, base_dir, ancho_pt, alto_pt, ancho_max,
-                             whitelist, log, aplicar_deglue, espacio, es_titulo=True)
+                             log, aplicar_deglue, espacio, es_titulo=True)
 
     # Figures. The .md and the json may declare the SAME images:
     #   - MinerU/Docling write "![](ruta)" in the .md and also list the
@@ -861,7 +741,7 @@ def enriquecer_desde_docling(tablas, figuras, docling_json, base_dir, md_path,
     }
 
 
-def _aplicar_entrada(tb, e, base_dir, ancho_pt, alto_pt, ancho_max, whitelist,
+def _aplicar_entrada(tb, e, base_dir, ancho_pt, alto_pt, ancho_max,
                      log, aplicar_deglue, espacio, es_titulo=True):
     cap = _primer_texto_util([e.get("table_caption")])
     foot = _primer_texto_util([e.get("table_footnote")])
@@ -871,7 +751,7 @@ def _aplicar_entrada(tb, e, base_dir, ancho_pt, alto_pt, ancho_max, whitelist,
     # as a title would invent a name the document does not have. It is stored as a
     # note, which is what it is.
     if es_titulo and not tb.get("titulo"):
-        limpio = limpiar_titulo_json(cap, whitelist, aplicar_deglue) if cap else None
+        limpio = limpiar_titulo_json(cap, aplicar_deglue) if cap else None
         if limpio:
             tb["titulo"] = limpio
             tb["titulo_origen"] = "json"
@@ -881,7 +761,7 @@ def _aplicar_entrada(tb, e, base_dir, ancho_pt, alto_pt, ancho_max, whitelist,
             log("The json brings no caption for the table on line %d; the user is "
                 "asked." % tb.get("linea", 0))
     if foot and not tb.get("nota"):
-        nota = limpiar_titulo_json(foot, whitelist, aplicar_deglue)
+        nota = limpiar_titulo_json(foot, aplicar_deglue)
         if nota:
             tb["nota"] = nota
             tb["nota_origen"] = "json-footnote"
@@ -975,7 +855,7 @@ def _medir(obj, bbox, ancho_pt, alto_pt, ancho_max, espacio, es_figura):
         obj["alto_in"] = round(min(h_in, (alto_pt - 144) / 72.0), 3)
 
 
-def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
+def analizar(md_path, base_dir, log, aplicar_deglue=True,
              detectar_en_linea=False):
     texto = read_text(md_path)
     lineas = texto.splitlines()
@@ -1057,7 +937,7 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
                 i += 1
                 continue
 
-            limpio, camb = deglue(strip_leading_markers(unescape_md(texto_h)), whitelist, aplicar_deglue)
+            limpio, camb = deglue(strip_leading_markers(unescape_md(texto_h)), aplicar_deglue)
             limpio = fix_colon_spacing(dedupe_numbering(limpio)).strip()
             cambios_deglue.extend(camb)
 
@@ -1165,7 +1045,7 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
                 titulo_en = m_en.group(2).strip()
                 # The body is group 3, NOT what comes after m_en.end(): group 3
                 # IS the body and m_en.end() falls just after it.
-                cuerpo_en, camb = deglue(m_en.group(3).strip(), whitelist,
+                cuerpo_en, camb = deglue(m_en.group(3).strip(),
                                          aplicar_deglue)
                 cambios_deglue.extend(camb)
                 cuerpo_en = fix_colon_spacing(dedupe_numbering(cuerpo_en)).strip()
@@ -1193,7 +1073,7 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
                 continue
 
         limpia = strip_leading_markers(crudo)
-        limpia, camb = deglue(limpia, whitelist, aplicar_deglue)
+        limpia, camb = deglue(limpia, aplicar_deglue)
         cambios_deglue.extend(camb)
         limpia = fix_colon_spacing(dedupe_numbering(limpia)).strip()
 
@@ -1292,9 +1172,6 @@ def analizar(md_path, base_dir, whitelist, log, aplicar_deglue=True,
             continue
         for m in PEGADO_RE.finditer(txt):
             if " " in m.group(0):
-                continue
-            # whitelisted terms are long and glued BY DESIGN
-            if any(w.lower() in m.group(0).lower() for w in whitelist if len(w) >= 8):
                 continue
             residuos[m.group(0)] = residuos.get(m.group(0), 0) + 1
     if residuos:
@@ -1495,7 +1372,6 @@ def main():
     ap.add_argument("--base-dir", help="base directory to resolve image paths")
 
     ap.add_argument("--portada", help="portada.json with the user's answers")
-    ap.add_argument("--whitelist", help="extra file of untouchable terms")
     ap.add_argument("--sin-deglue", action="store_true", help="do not split glued words")
     ap.add_argument("--titulos-tabla-json", help="JSON {index: title} from the agent")
     ap.add_argument("--titulos-figura-json", help="JSON {index: title} from the agent")
@@ -1532,14 +1408,12 @@ def main():
         return 2
 
     base_dir = args.base_dir or os.path.dirname(os.path.abspath(args.md))
-    whitelist = cargar_whitelist(args.whitelist)
 
     log("=== PHASE 1: .md analysis ===")
     log("Source       : %s" % args.md)
     log("sha256       : %s" % sha256_of(args.md))
     log("Size         : %d bytes" % os.path.getsize(args.md))
     log("Base dir     : %s" % base_dir)
-    log("Terms in whitelist: %d" % len(whitelist))
     log("")
 
     # MinerU/Docling deliver the prose .md next to a *_content_list.json with the
@@ -1553,7 +1427,7 @@ def main():
                 log("MinerU/Docling json detected on its own: %s" % os.path.basename(cand))
                 break
 
-    res = analizar(args.md, base_dir, whitelist, log,
+    res = analizar(args.md, base_dir, log,
                    aplicar_deglue=not args.sin_deglue,
                    detectar_en_linea=args.detectar_niveles_en_linea)
 
@@ -1561,7 +1435,7 @@ def main():
     if docling_json:
         info_docling = enriquecer_desde_docling(
             res["tablas"], res["figuras"], docling_json, base_dir, args.md,
-            args.pdf, args.ancho_max_tabla, whitelist, log,
+            args.pdf, args.ancho_max_tabla, log,
             aplicar_deglue=not args.sin_deglue)
         log("")
 

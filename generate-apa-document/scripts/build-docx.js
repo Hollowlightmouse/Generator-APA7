@@ -56,6 +56,7 @@ const {
   Bookmark, SimpleField, PageBreak, Footer, Header, PageNumber, AlignmentType,
   TabStopType, LeaderType, BorderStyle, WidthType, ShadingType, VerticalAlign,
   SectionType, PageOrientation, TableLayoutType, HeightRule, convertInchesToTwip,
+  Tab,
 } = require(RUTA_DOCX);
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,32 @@ const UMBRAL_COLUMNAS_ANCHAS = 6;    // from 6 columns on
 const UMBRAL_LINEAS_APRETADAS = 8;    // lines per cell that are no longer readable
 const ANCHO_CARACTER_TWIP = 120;      // average character width at 12 pt
 const MARGEN_CELDA_LR = 160;          // cell left and right margins
+
+// docx@9 always emits a <w:tblGrid>, and when columnWidths is omitted it fills
+// that grid with 100 twips per column. The per-cell widths (tcW) are written too,
+// so which of the two wins depends on the consumer. Passing columnWidths makes
+// the grid agree with the cells, so the layout comes out the same in Word,
+// LibreOffice and any other renderer. The LAST column absorbs the remainder so
+// the widths add up to exactly `anchoTotal`: ncols * floor(ancho/ncols) is short
+// by one or two twips on most divisions, and the table would not match the width
+// it declares.
+function repartirColumnas(anchoTotal, n) {
+  if (!(n > 0)) return [];
+  const base = Math.floor(anchoTotal / n);
+  const out = new Array(n).fill(base);
+  out[n - 1] += anchoTotal - base * n;
+  return out;
+}
+
+// Every table is built here. The missing-columnWidths bug was SILENT: the .docx
+// was produced, the pipeline advanced, and the only symptom was the rendered
+// PDF. A table without columnWidths now aborts the build instead of shipping.
+function crearTabla(opts) {
+  if (!opts.columnWidths || !opts.columnWidths.length) {
+    throw new Error("crearTabla: 'columnWidths' is required (use repartirColumnas)");
+  }
+  return new Table(opts);
+}
 
 // Cover page in 3 real vertical zones: title at the top, members in the middle
 // of the page and the institutional block anchored at the bottom. It is built as
@@ -314,9 +341,12 @@ function construirPortada() {
     })],
   });
 
-  return [new Table({
+  return [crearTabla({
     width: { size: ANCHO_CONTENIDO, type: WidthType.DXA },
     layout: TableLayoutType.FIXED,
+    // The cover grid: a single column as wide as the usable text width, so the
+    // grid docx emits agrees with the cell width set in filaZona.
+    columnWidths: [ANCHO_CONTENIDO],
     // The top zone's spacing is SUBTRACTED from its height: the rows have to add
     // up to exactly the usable height (12960 twips). Adding more overflows the
     // last row onto a new page.
@@ -339,7 +369,7 @@ function lineaTOC(texto, bookmark, nivel = 1) {
     tabStops: [{ type: TabStopType.RIGHT, position: ANCHO_CONTENIDO, leader: LeaderType.DOT }],
     children: [
       new TextRun({ text: texto, font: FUENTE, size: TAM, bold: nivel === 1 }),
-      new TextRun({ text: "\t", font: FUENTE, size: TAM }),
+      new TextRun({ children: [new Tab()], font: FUENTE, size: TAM }),
       new SimpleField(`PAGEREF ${bookmark} \\h`),
     ],
   });
@@ -464,6 +494,9 @@ function evaluarAncho(t) {
 function construirTabla(t, ancho = ANCHO_CONTENIDO) {
   const hijos = [];
   const ncols = Math.max(...t.filas.map((f) => f.length));
+  // Computed ONCE here and reused for both the cell widths (tcW) and the table
+  // grid (columnWidths): if they were computed separately they could disagree.
+  const anchos = repartirColumnas(ancho, ncols);
 
   // Number in bold above the table; title in italics below (APA 7).
   // The bookmark goes on the number: that is what the list of tables points at
@@ -505,7 +538,7 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
       });
       celdas.push(new TableCell({
         children: [par],
-        width: { size: Math.floor(ancho / ncols), type: WidthType.DXA },
+        width: { size: anchos[c], type: WidthType.DXA },
         verticalAlign: VerticalAlign.CENTER,
         margins: { top: 60, bottom: 60, left: 80, right: 80 },
         // APA 7: no vertical lines. Only the table's top border,
@@ -524,10 +557,11 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
   // Bottom border only on the last row: APA 7 does not use vertical lines.
   // (resolved when creating each cell, not by mutating the generated XML)
 
-  hijos.push(new Table({
+  hijos.push(crearTabla({
     rows: filasDoc,
     width: { size: ancho, type: WidthType.DXA },
     layout: TableLayoutType.FIXED,
+    columnWidths: anchos,
   }));
 
   if (t.nota) {
@@ -969,7 +1003,11 @@ async function main() {
   }
 
   const doc = new Document({
-    creator: "generar-pdf-apa",
+    creator: "generate-apa-document",
+    // Tells the consumer to recalculate every field when the file is opened.
+    // Without it the PAGEREF fields of the indexes ship unresolved: the .docx
+    // shows blanks or a 0 and only LibreOffice fixes them while exporting.
+    features: { updateFields: true },
     title: p.titulo || "Documento APA 7",
     description: `Generado desde ${M.fuente ? M.fuente.md : "fuente .md"}`,
     styles: {
