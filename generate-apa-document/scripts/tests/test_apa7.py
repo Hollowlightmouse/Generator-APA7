@@ -418,7 +418,8 @@ class TestNoHardcodedPaths(CheckHarness):
                 imported.add((node.module or "").split(".")[0])
         imported.discard("")
         self.assertTrue(imported)
-        allowed = {"argparse", "json", "os", "sys", "time", "datetime", "pathlib", "lib"}
+        allowed = {"argparse", "json", "os", "sys", "time", "datetime", "pathlib",
+           "subprocess", "lib"}
         self.assertEqual(imported - allowed, set(),
                          "third-party import in apa7.py: %s" % (imported - allowed))
 

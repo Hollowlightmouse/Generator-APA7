@@ -38,6 +38,7 @@ Optional environment variables
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -45,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from lib import instalador  # noqa: E402
 from lib import rutas  # noqa: E402
 
 _FLOOR = "%d.%d" % rutas.MIN_PYTHON
@@ -362,6 +364,313 @@ def cmd_export(args):
 
 
 # ---------------------------------------------------------------------------
+# install
+# ---------------------------------------------------------------------------
+def _confirm(description, assume_yes, dry_run):
+    """The single place where an action is allowed to happen.
+
+    Every installing step goes through here, so `--dry-run` cannot leak a real
+    installation: there is exactly one gate to get right instead of one per
+    step. It also never blocks. An agent or a redirected stdin has nobody to
+    answer a password or a y/n prompt, so a non-interactive run without --yes
+    refuses instead of hanging until someone kills it.
+    """
+    if dry_run:
+        rutas.log("[dry-run] would: %s" % description)
+        return False
+
+    if assume_yes:
+        rutas.log("Confirmed by --yes: %s" % description)
+        return True
+
+    if not sys.stdin.isatty():
+        sys.stderr.write(
+            "ERROR: %s needs confirmation, but stdin is not a terminal.\n"
+            "Nothing was installed. Re-run with --yes to confirm, or with "
+            "--dry-run to see the plan.\n" % description)
+        return False
+
+    sys.stderr.write("%s\nProceed? [y/N] " % description)
+    sys.stderr.flush()
+    answer = sys.stdin.readline().strip().lower()
+    return answer in ("y", "yes")
+
+
+def _run_install(argv, cwd=None, timeout=1800):
+    """Run an install command. Output goes to stderr, never to the contract."""
+    argv = [str(argument) for argument in argv]
+    rutas.log("Running: %s" % " ".join(argv))
+    try:
+        completed = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            # DEVNULL, never inherit: apt and brew both prompt, and an
+            # interactive prompt in a redirected run blocks until timeout.
+            stdin=subprocess.DEVNULL,
+            cwd=str(cwd) if cwd else None,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # The process tree is left to the platform; these installers are
+        # idempotent enough to re-run, and a traceback here would hide which
+        # step hung.
+        sys.stderr.write("ERROR: the command above did not finish within %s "
+                         "seconds and was stopped. Re-run it, or install the "
+                         "component by hand.\n" % timeout)
+        return 124
+    except OSError as exc:
+        # The usual cause is a package manager that disappeared between the
+        # check and now, or a wrong override in an env var.
+        sys.stderr.write("ERROR: could not run %s (%s).\n" % (argv[0], exc))
+        return 127
+
+    if completed.returncode != 0:
+        for line in (completed.stdout or "").splitlines():
+            if line.strip():
+                sys.stderr.write("    %s\n" % line)
+    return completed.returncode
+
+
+def cmd_install(args):
+    """Install whatever `check` reported as missing.
+
+    Idempotent: a tool that is already present is not touched. At the end it
+    runs the preflight again and returns its exit code, so the caller gets one
+    consistent answer about the environment.
+
+    Progress goes to stderr; the final `check` output goes to stdout. That is
+    the only thing this command writes to stdout, so `install | check`-style
+    parsing keeps working.
+    """
+    only = set(tool.strip().lower() for tool in (args.only or []))
+    unknown = only - set(instalador.TOOLS)
+    if unknown:
+        sys.stderr.write("ERROR: unknown --only value(s): %s\n"
+                         % ", ".join(sorted(unknown)))
+        sys.stderr.write("Valid tools: %s\n" % ", ".join(instalador.TOOLS))
+        return 2
+
+    def wants(tool):
+        return not only or tool in only
+
+    def step(message):
+        rutas.log(message)
+
+    step("--- Initial environment check ---")
+    if cmd_check(None) == 0:
+        step("Nothing to install: environment complete.")
+        return 0
+
+    manager = rutas.package_manager()
+    if manager is None:
+        # `check` reports this as INFO, because the environment can be complete
+        # without a manager. `install` is the one command that cannot work
+        # without one, so here it is fatal and the manual steps are printed.
+        sys.stderr.write("\nERROR: no supported package manager was found "
+                         "(winget, brew, apt, dnf, pacman).\n")
+        sys.stderr.write("Automatic installation cannot run. Install by hand "
+                         "whatever `check` reported as MISSING:\n")
+        for tool in instalador.TOOLS:
+            if wants(tool):
+                for line in instalador.manual_instructions(
+                        tool, rutas.is_windows(), rutas.is_macos()):
+                    sys.stderr.write("  %s\n" % line)
+        sys.stderr.write("Then run: python scripts/apa7.py check\n")
+        return 1
+
+    step("Package manager available: %s (%s)" % (manager.name, manager.path))
+    step(instalador.python_version_note())
+
+    # --- 1. Node.js + npm ---------------------------------------------------
+    node = rutas.node_path()
+    if node and wants("node"):
+        step("Node.js present: %s" % node)
+    elif not node and not wants("node"):
+        step("Node.js is missing and --only excludes it: skipping.")
+    elif not node:
+        argv = instalador.build(manager, "node")
+        if _confirm("Install Node.js LTS", args.yes, args.dry_run):
+            step("Installing Node.js LTS...")
+            if _run_install(argv) != 0:
+                sys.stderr.write("FAILED to install Node.js. Try by hand:\n  %s\n"
+                                 % instalador.manual_instructions(
+                                     "node", rutas.is_windows(), rutas.is_macos())[0])
+                return 1
+        node = rutas.node_path()
+
+    npm = rutas.npm_path()
+    if not npm:
+        # Only fatal if this run was supposed to end up with Node in it. With
+        # --only libreoffice there is nothing to be done about npm, and bailing
+        # out here would silently skip the step the user actually asked for.
+        if wants("node") or wants("docx"):
+            sys.stderr.write("FAILED: npm is not available after installing "
+                             "Node.js.\n")
+            return 1
+        step("npm is unavailable and --only excludes Node/docx: skipping that step.")
+
+    # --- 2. docx library -----------------------------------------------------
+    module_dir = rutas.node_dir() / "node_modules" / "docx"
+    if module_dir.is_dir():
+        step("docx (npm) present.")
+    elif not wants("docx"):
+        step("docx is missing and --only excludes it: skipping.")
+    elif not npm:
+        step("docx cannot be installed without npm: skipping.")
+    else:
+        node_dir = rutas.node_dir()
+        node_dir.mkdir(parents=True, exist_ok=True)
+        anchor = node_dir / "package.json"
+        if not anchor.exists():
+            anchor.write_text(instalador.npm_anchor_json(), encoding="utf-8")
+            step("Created npm anchor: %s" % anchor)
+
+        description = "npm install docx@%s in %s" % (rutas.DEPS["docx"], node_dir)
+        if _confirm(description, args.yes, args.dry_run):
+            step("Installing docx@%s..." % rutas.DEPS["docx"])
+            if _run_install(instalador.npm_install_docx(
+                    npm, node_dir, rutas.DEPS["docx"]), cwd=node_dir) != 0:
+                sys.stderr.write("FAILED to install docx (npm).\n")
+                return 1
+            if not module_dir.is_dir():
+                sys.stderr.write("FAILED: docx is still not in %s\n" % module_dir)
+                return 1
+            step("docx (npm) installed.")
+        else:
+            step("docx is missing and the run was not confirmed: skipped.")
+
+    # --- 3. Python interpreter ----------------------------------------------
+    # The venv below needs a real base interpreter, so this comes first. It is
+    # after Node on purpose: the Windows Python installer adds shims that need
+    # to be on PATH, and doing it after npm keeps them visible.
+    base = None
+    existing_venv = rutas.venv_python()
+    if existing_venv and rutas.python_works(existing_venv):
+        base = existing_venv
+        step("Virtual environment usable: %s" % base)
+
+    if base is None:
+        override = os.environ.get("APA7_PYTHON")
+        if override and rutas.python_works(override):
+            base = override
+    if base is None:
+        base = rutas.python_path()
+
+    if not base:
+        if not wants("python"):
+            # Not fatal: the remaining wanted steps (LibreOffice) do not need
+            # Python. The final check is what reports the environment as still
+            # incomplete, so the exit code stays truthful either way.
+            sys.stderr.write("WARNING: no working Python interpreter and --only "
+                             "excludes installing one.\n")
+            step("Skipping Python, the virtual environment and pymupdf.")
+        elif _confirm("Install Python 3.12", args.yes, args.dry_run):
+            step("Installing Python 3.12...")
+            if _run_install(instalador.build(manager, "python")) != 0:
+                sys.stderr.write("FAILED to install Python. Try by hand:\n  %s\n"
+                                 % instalador.manual_instructions(
+                                     "python", rutas.is_windows(), rutas.is_macos())[0])
+                return 1
+            base = rutas.python_path()
+        else:
+            step("No Python interpreter and the run was not confirmed: skipping "
+                 "the virtual environment and pymupdf.")
+    if base:
+        step("Python interpreter available: %s" % base)
+
+    # --- 4. venv + pinned pymupdf -------------------------------------------
+    # pymupdf used to be installed with a bare `pip install pymupdf` against
+    # whatever interpreter was found: unpinned, and against the SYSTEM
+    # interpreter, which on a PEP 668 "externally managed" Python fails with
+    # externally-managed-environment. Installing into the skill's own venv fixes
+    # both: the version is pinned and pip never touches the system.
+    venv_dir = rutas.skill_root() / ".venv"
+    venv_exe = _venv_executable(venv_dir)
+
+    if venv_exe.is_file() and not rutas.python_works(str(venv_exe)):
+        # A venv records the absolute path of its base interpreter (pyvenv.cfg),
+        # so if that interpreter moved or was upgraded the venv exists but cannot
+        # run. It cannot be repaired, only rebuilt.
+        step("The virtual environment exists but does not run (its base "
+             "interpreter moved or was upgraded). Recreating it...")
+        if not args.dry_run:
+            rutas.remove_tree(venv_dir)
+
+    if venv_exe.is_file():
+        step("Virtual environment present: %s" % venv_exe)
+    elif not base:
+        # Nothing to build a venv with; step 3 already said so.
+        pass
+    elif not wants("pymupdf"):
+        # Not fatal: --only libreoffice still has LibreOffice to install, and the
+        # final check reports pymupdf as MISSING on its own.
+        sys.stderr.write("WARNING: no virtual environment at %s and --only "
+                         "excludes creating it; `verify` will not work.\n"
+                         % venv_dir)
+    elif _confirm("Create the virtual environment at %s" % venv_dir,
+                  args.yes, args.dry_run):
+        step("Creating the virtual environment: %s" % venv_dir)
+        if _run_install([base, "-m", "venv", str(venv_dir)]) != 0 or not venv_exe.is_file():
+            sys.stderr.write("FAILED to create the virtual environment.\n")
+            return 1
+        step("Virtual environment created.")
+    else:
+        step("No virtual environment and the run was not confirmed: skipped.")
+
+    # From here on the venv interpreter is the one that matters, whatever the
+    # override or the discovery said.
+    if venv_exe.is_file():
+        pin = rutas.DEPS["pymupdf"]
+        probed = rutas.run([str(venv_exe), "-c", "import pymupdf; print(pymupdf.__version__)"])
+        if probed.exit_code != 0 or probed.first_line != pin:
+            description = "pip install pymupdf==%s into %s" % (pin, venv_dir)
+            if _confirm(description, args.yes, args.dry_run):
+                step("Installing pymupdf==%s..." % pin)
+                if _run_install([str(venv_exe), "-m", "pip", "install",
+                                 "--disable-pip-version-check", "pymupdf==%s" % pin]) != 0:
+                    sys.stderr.write("FAILED to install pymupdf==%s.\n" % pin)
+                    return 1
+                step("pymupdf installed.")
+            else:
+                step("pymupdf missing or wrong version and the run was not "
+                     "confirmed: skipping.")
+        else:
+            step("pymupdf present: %s" % probed.first_line)
+
+    # --- 5. LibreOffice ------------------------------------------------------
+    if rutas.soffice_path():
+        step("LibreOffice present.")
+    elif not wants("libreoffice"):
+        step("LibreOffice is missing and --only excludes it: skipping.")
+    else:
+        if _confirm("Install LibreOffice", args.yes, args.dry_run):
+            step("Installing LibreOffice (this can take several minutes)...")
+            if _run_install(instalador.build(manager, "libreoffice"),
+                            timeout=3600) != 0 or not rutas.soffice_path():
+                sys.stderr.write("FAILED: LibreOffice not found after installation.\n")
+                sys.stderr.write("Paths examined: %s\n"
+                                 % " | ".join(p for p in rutas.soffice_candidates() if p))
+                sys.stderr.write("If it is installed elsewhere, set APA7_SOFFICE "
+                                 "to the full path.\n")
+                return 1
+            step("LibreOffice installed: %s" % rutas.soffice_path())
+
+    # --- 6. Final check ------------------------------------------------------
+    step("--- Final environment check ---")
+    return cmd_check(None)
+
+
+def _venv_executable(venv_dir):
+    """The interpreter inside a venv, in the layout of THIS platform."""
+    if rutas.is_windows():
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python3"
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main(argv=None):
@@ -386,6 +695,20 @@ def main(argv=None):
     export_parser.add_argument("--timeout", type=int, default=300,
                                help="maximum wait in seconds (default: 300)")
     export_parser.set_defaults(handler=cmd_export)
+
+    install_parser = subparsers.add_parser(
+        "install", help="install whatever is missing")
+    install_parser.add_argument(
+        "--only", action="append", metavar="<tool>",
+        help="install only this tool; repeatable. One of: %s"
+             % ", ".join(instalador.TOOLS))
+    install_parser.add_argument(
+        "--yes", action="store_true",
+        help="do not ask for confirmation (required when stdin is not a terminal)")
+    install_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="print what would be installed and change nothing")
+    install_parser.set_defaults(handler=cmd_install)
 
     args = parser.parse_args(argv)
     try:
