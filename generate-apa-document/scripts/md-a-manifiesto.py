@@ -453,7 +453,7 @@ RE_IMAGEN = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 RE_NUM_HEADING = re.compile(r"^\s*(\d{1,2})[\.\)]\s+(.*)$")
 RE_FIG_CAPTION = re.compile(r"^\s*(?:figura|imagen|image|ilustraci\u00f3n)\s*(\d+)\s*[.:\-\u2013]?\s*(.*)$", re.I)
 RE_TAB_CAPTION = re.compile(r"^\s*(?:tabla|cuadro|table)\s*(\d+)\s*[.:\-\u2013]?\s*(.*)$", re.I)
-RE_NRC = re.compile(r"\bNRC\s*[:\s]*\s*([0-9]{4,}[-â€“A-Za-z0-9]*)", re.I)
+RE_NRC = re.compile(r"\bNRC\s*[:\s]*\s*([0-9]{4,}[-\u2013A-Za-z0-9]*)", re.I)
 RE_DATE = re.compile(r"(\d{1,2})\s+de\s+([a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+)\s+de\s+(\d{4})", re.I)
 
 CAMPOS_PORTADA = [
@@ -1272,7 +1272,7 @@ def detectar_portada(lineas, overrides):
         mn = RE_NRC.search(txt)
         if mn and not portada["materia_nrc"]:
             # 'Nombre Apellido Segundo NRC: 00000000' -> author + NRC separated
-            resto = RE_NRC.sub("", txt).strip(" :-â€“,")
+            resto = RE_NRC.sub("", txt).strip(" :-\u2013,")
             portada["materia_nrc"] = "NRC " + mn.group(1)
             if _es_nombre_persona(resto):
                 portada["autores"] = [p.strip() for p in resto.split(",")]
@@ -1280,7 +1280,7 @@ def detectar_portada(lineas, overrides):
 
         mdoc = re.search(r"(profesor|profesora|docente|teacher)\s*[:\-]?\s*(.*)$", txt, re.I)
         if mdoc and not portada["docente"]:
-            nombre = mdoc.group(2).strip(" :-â€“,")
+            nombre = mdoc.group(2).strip(" :-\u2013,")
             partes = [p.strip() for p in nombre.split(",") if p.strip()]
             portada["docente"] = partes[0] if partes else nombre
             if len(partes) > 1 and partes[1]:

@@ -43,6 +43,11 @@ try:
 except ImportError:  # pymupdf < 1.24.3 published the same module as 'fitz'
     import fitz as pymupdf
 
+# The font rule lives in lib/ so it can be tested without pymupdf. This script
+# is otherwise standalone, hence the explicit path insert.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib import fuentes as fuentes_mod  # noqa: E402
+
 PT_PULGADA = 72.0
 PAGINA_CARTA = (612.0, 792.0)
 
@@ -532,19 +537,29 @@ def verificar(args):
     # --- 11. Typography --------------------------------------------------
     # PDFs embed the fonts with a subset prefix ("BAAAAA+"), so it must be
     # removed before comparing the name.
+    #
+    # Times New Roman is not installed with the operating system, so LibreOffice
+    # substitutes a metrically compatible font wherever it is missing -- which on
+    # Linux and macOS is the normal case, not an error. Those substitutes have
+    # the same advance widths, so the layout is identical and they are accepted;
+    # they are still reported so the reader knows what the machine really used.
+    # Anything else stays a failure, because with different metrics the line
+    # advance measured in check 12 no longer means anything.
     fuentes = set()
     for i in range(total):
         for f in doc[i].get_fonts(full=False):
             fuentes.add(f[3] if len(f) > 3 else str(f))
 
-    def nombre_limpio(n):
-        n = re.sub(r"^[A-Z]{6}\+", "", n or "")     # subset prefix
-        return re.sub(r"[^a-z]", "", n.lower())
+    declaradas, sustituciones, rechazadas = fuentes_mod.particiona(sorted(fuentes))
+    detalle = "fonts: %s" % (", ".join(fuentes) if fuentes else "none")
+    if sustituciones:
+        detalle += ("  -> metric-compatible substitute for Times New Roman: %s"
+                    % ", ".join(sustituciones))
+    if rechazadas:
+        detalle += "  -> NOT accepted: " + "; ".join(
+            "%s (%s)" % (nombre, motivo) for nombre, motivo in rechazadas)
 
-    raras = [f for f in fuentes if "timesnewroman" not in nombre_limpio(f)]
-    R.anota("Only the declared typeface is used", not raras,
-            "fonts: %s%s" % (", ".join(sorted(fuentes)) if fuentes else "none",
-                               ("  -> NOT declared: " + ", ".join(raras)) if raras else ""))
+    R.anota("Only the declared typeface is used", not rechazadas, detalle)
 
     # --- 12. Line spacing ------------------------------------------------
     # pymupdf returns each LINE as a separate block, not the paragraph, so
