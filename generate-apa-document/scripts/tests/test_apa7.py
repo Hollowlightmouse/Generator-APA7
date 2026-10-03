@@ -1,0 +1,291 @@
+"""Tests for the `check` output contract of apa7.py.
+
+The contract is what SKILL.md parses, so it is tested as carefully as the code
+behind it: which stream it goes to, the exact `STATE|tool|detail` shape, and
+the fact that an INFO line can never turn a working environment into RESULT:
+MISSING.
+
+Standard library only, on purpose.
+"""
+import ast
+import contextlib
+import io
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import apa7  # noqa: E402
+from lib import rutas  # noqa: E402
+
+
+class _Line:
+    """Minimal stand-in for rutas.NativeResult and rutas.SofficeResult."""
+
+    def __init__(self, first_line="", exit_code=0, stdout="", timed_out=False):
+        self.first_line = first_line
+        self.exit_code = exit_code
+        self.stdout = stdout
+        self.stderr = ""
+        self.timed_out = timed_out
+
+
+def _fake_run(argv, timeout=60, cwd=None):
+    """Answer the five probes cmd_check makes, by looking at the argv."""
+    argv = [str(a) for a in argv]
+    joined = " ".join(argv)
+    if "pymupdf" in joined:
+        return _Line("1.28.2")
+    if "sys.version_info" in joined:
+        return _Line("3.12.10 OK")
+    if argv[-1:] == ["--version"]:
+        # node prints a leading v, npm does not.
+        return _Line("11.12.1" if "npm" in argv[0] else "v24.11.0")
+    if "require(" in joined:
+        return _Line("ok")
+    return _Line()
+
+
+class _Env:
+    """A complete, healthy environment. Individual tests break one thing.
+
+    docx is really installed in a temporary node dir, because a healthy
+    environment that reports docx as MISSING is not healthy and the other tests
+    would be asserting against noise.
+    """
+
+    def __init__(self, **overrides):
+        self.overrides = overrides
+        self._tmp = None
+
+    def __enter__(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        workdir = Path(self._tmp.name)
+        package_json = workdir / "node_modules" / "docx" / "package.json"
+        package_json.parent.mkdir(parents=True)
+        package_json.write_text('{"version": "9.7.1"}', encoding="utf-8")
+
+        # Values are patched as return_value and callables as new, because
+        # patch.object's third positional argument REPLACES the attribute: a
+        # plain string would make `rutas.python_path()` a call on a str.
+        defaults = {
+            "python_path": "/usr/bin/python3",
+            "venv_python": None,
+            "node_path": "/usr/bin/node",
+            "npm_path": "/usr/bin/npm",
+            "node_dir": workdir,
+            "soffice_path": "/usr/bin/soffice",
+            "soffice_candidates": ["/usr/bin/soffice"],
+            "package_manager": rutas.PackageManager("apt", "/usr/bin/apt-get"),
+            "run": _fake_run,
+            "run_soffice": lambda *a, **k: _Line(stdout="LibreOffice 26.8.0.3"),
+        }
+        defaults.update(self.overrides)
+        patches = []
+        for key, value in defaults.items():
+            if callable(value):
+                patches.append(mock.patch.object(rutas, key, value))
+            else:
+                patches.append(mock.patch.object(rutas, key, return_value=value))
+        for patcher in patches:
+            patcher.start()
+        self._patches = patches
+        return self
+
+    def __exit__(self, *_exc):
+        for patcher in reversed(self._patches):
+            patcher.stop()
+        if self._tmp is not None:
+            self._tmp.cleanup()
+        return False
+
+
+class CheckHarness(unittest.TestCase):
+    def run_check(self, env=None):
+        """Run cmd_check and return (exit_code, stdout, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with env or _Env():
+                code = apa7.cmd_check(None)
+        return code, out.getvalue(), err.getvalue()
+
+
+class TestContract(CheckHarness):
+    def test_every_tool_line_has_the_documented_shape(self):
+        _, out, _ = self.run_check()
+        states = set()
+        for line in out.splitlines():
+            # The contract is about lines that OPEN with a state. The trailing
+            # prose (RESULT:, ENVIRONMENT OK:, MISSING:, Run:) is guidance for
+            # the agent and is not part of the parseable block.
+            if not line.startswith(("OK|", "MISSING|", "INFO|")):
+                continue
+            parts = line.split("|")
+            self.assertEqual(len(parts), 3, "not STATE|tool|detail: %r" % line)
+            self.assertTrue(parts[1].strip(), "empty tool name: %r" % line)
+            states.add(parts[0])
+        self.assertEqual(states, {"OK", "INFO"})
+
+    def test_a_healthy_environment_is_ok_with_exit_code_zero(self):
+        code, out, _ = self.run_check()
+        self.assertIn("RESULT: OK", out)
+        self.assertEqual(code, 0)
+
+    def test_nothing_is_written_to_stderr(self):
+        # stdout is the contract; a stray line there breaks the parser, and
+        # check has no progress to report anyway.
+        _, _, err = self.run_check()
+        self.assertEqual(err, "")
+
+    def test_the_result_line_comes_last_and_is_unambiguous(self):
+        _, out, _ = self.run_check()
+        self.assertIn("RESULT: OK", out)
+        self.assertNotIn("RESULT: MISSING", out)
+
+
+class TestPackageManagerIsInformative(CheckHarness):
+    """The regression this whole INFO state exists for."""
+
+    def test_a_missing_package_manager_does_not_break_the_result(self):
+        env = _Env(package_manager=None)
+        code, out, _ = self.run_check(env)
+        self.assertIn("INFO|Package manager|none found", out)
+        self.assertIn("RESULT: OK", out)
+        self.assertEqual(code, 0)
+
+    def test_a_present_package_manager_is_reported_as_info_too(self):
+        _, out, _ = self.run_check(_Env(package_manager=rutas.PackageManager("brew", "/opt/homebrew/bin/brew")))
+        self.assertIn("INFO|Package manager|brew  (/opt/homebrew/bin/brew)", out)
+        self.assertNotIn("MISSING|Package manager", out)
+
+    def test_info_never_appears_in_the_missing_summary(self):
+        code, out, _ = self.run_check(_Env(package_manager=None, node_path=None))
+        summary = [l for l in out.splitlines() if l.startswith("MISSING:")][0]
+        self.assertNotIn("Package manager", summary)
+        self.assertEqual(code, 1)
+
+
+class TestMissingTools(CheckHarness):
+    def test_a_missing_tool_turns_the_result_into_missing(self):
+        code, out, _ = self.run_check(_Env(node_path=None))
+        self.assertIn("MISSING|Node.js|not found on PATH", out)
+        self.assertIn("RESULT: MISSING", out)
+        self.assertIn("MISSING: Node.js", out)
+        self.assertEqual(code, 1)
+
+    def test_the_summary_names_every_missing_tool(self):
+        env = _Env(node_path=None, npm_path=None)
+        _, out, _ = self.run_check(env)
+        summary = [l for l in out.splitlines() if l.startswith("MISSING:")][0]
+        self.assertIn("Node.js", summary)
+        self.assertIn("npm", summary)
+
+    def test_the_failure_tells_the_agent_what_to_do_next(self):
+        _, out, _ = self.run_check(_Env(node_path=None))
+        self.assertIn("python scripts/apa7.py install", out)
+
+
+class TestPythonDiagnostics(CheckHarness):
+    """A broken venv and a missing Python need different instructions."""
+
+    def test_no_python_at_all_mentions_the_override(self):
+        _, out, _ = self.run_check(_Env(python_path=None, venv_python=None))
+        self.assertIn("MISSING|Python|not found (set APA7_PYTHON", out)
+        self.assertIn("MISSING|pymupdf|not verifiable: Python missing", out)
+
+    def test_a_broken_venv_is_told_to_be_recreated_not_reinstalled(self):
+        _, out, _ = self.run_check(_Env(python_path=None, venv_python="/skill/.venv/bin/python3"))
+        self.assertIn("exists but does not run", out)
+        self.assertIn("Recreate it with: python scripts/apa7.py install", out)
+
+    def test_a_too_old_interpreter_is_reported_with_the_floor(self):
+        old = lambda *a, **k: _Line("3.8.10 TOO-OLD", exit_code=3)
+        _, out, _ = self.run_check(_Env(run=old))
+        self.assertIn("MISSING|Python|3.8.10 is below the 3.9 floor", out)
+
+    def test_a_version_mismatch_stays_ok_and_is_only_a_note(self):
+        def run_with_other_pymupdf(argv, timeout=60, cwd=None):
+            if "pymupdf" in " ".join(str(a) for a in argv):
+                return _Line("1.24.0")
+            return _fake_run(argv, timeout, cwd)
+
+        code, out, _ = self.run_check(_Env(run=run_with_other_pymupdf))
+        self.assertIn("MISMATCH: pinned", out)
+        self.assertIn("RESULT: OK", out)
+        self.assertEqual(code, 0)
+
+
+class TestDocxResolution(CheckHarness):
+    def test_docx_is_not_verifiable_without_node(self):
+        _, out, _ = self.run_check(_Env(node_path=None))
+        self.assertIn("MISSING|docx (npm)|not verifiable: Node.js missing", out)
+
+    def test_a_missing_package_json_points_at_install(self):
+        with tempfile_workdir() as empty:
+            _, out, _ = self.run_check(_Env(node_dir=empty))
+        self.assertIn("not installed in", out)
+        self.assertIn("python scripts/apa7.py install", out)
+
+
+class TestLibreOffice(CheckHarness):
+    def test_not_found_lists_the_places_that_were_searched(self):
+        _, out, _ = self.run_check(_Env(soffice_path=None,
+                                         soffice_candidates=["/usr/bin/soffice", "/opt/bin/soffice"]))
+        self.assertIn("MISSING|LibreOffice|not found. Searched: /usr/bin/soffice | /opt/bin/soffice", out)
+
+    def test_an_unreadable_version_is_a_failure_with_the_exit_code(self):
+        env = _Env(run_soffice=lambda *a, **k: _Line(stdout="", exit_code=1))
+        _, out, _ = self.run_check(env)
+        self.assertIn("MISSING|LibreOffice|could not read the version (exit code 1)", out)
+
+    def test_a_wrong_version_of_the_package_is_only_a_note(self):
+        def run_with_json(argv, timeout=60, cwd=None):
+            return _Line("ok")
+
+        with tempfile_workdir() as workdir:
+            pkg = Path(workdir) / "node_modules" / "docx" / "package.json"
+            pkg.parent.mkdir(parents=True)
+            pkg.write_text('{"version": "9.0.0"}', encoding="utf-8")
+            _, out, _ = self.run_check(_Env(node_dir=Path(workdir), run=run_with_json))
+        self.assertIn("MISMATCH: pinned 9.7.1", out)
+
+
+@contextlib.contextmanager
+def tempfile_workdir():
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        yield Path(tmp)
+
+
+class TestNoHardcodedPaths(CheckHarness):
+    """Every machine-specific path has to be resolved, never written down."""
+
+    def test_the_source_contains_no_absolute_machine_paths(self):
+        source = Path(apa7.__file__).read_text(encoding="utf-8")
+        for needle in ("C:\\", "C:/", "/Users/", "\\\\Users\\\\"):
+            self.assertNotIn(needle, source, "hardcoded path in apa7.py: %s" % needle)
+
+    def test_it_imports_nothing_outside_the_standard_library(self):
+        # Checked on the parsed tree, not with a substring search: `check` runs
+        # a subprocess probe that contains the text "import pymupdf", and that
+        # is a string handed to another interpreter, not an import of ours.
+        tree = ast.parse(Path(apa7.__file__).read_text(encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                imported.add((node.module or "").split(".")[0])
+        imported.discard("")
+        self.assertTrue(imported)
+        allowed = {"argparse", "json", "os", "sys", "lib"}
+        self.assertEqual(imported - allowed, set(),
+                         "third-party import in apa7.py: %s" % (imported - allowed))
+
+
+if __name__ == "__main__":
+    unittest.main()
