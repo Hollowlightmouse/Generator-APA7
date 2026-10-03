@@ -9,6 +9,10 @@
 # scripts\instalar-entorno.ps1.
 .venv/
 venv/
+# Dependencias de Node. Normalmente viven dentro de .work/, pero si APA7_NODEDIR
+# apunta a otro sitio (por ejemplo la carpeta de la skill) dejarian node_modules
+# suelto en el arbol del repositorio.
+node_modules/
 
 # --- Datos de entorno y rutas locales ---------------------------------------
 # Configuracion local por maquina: nunca se versiona.
