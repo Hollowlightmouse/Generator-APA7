@@ -6,7 +6,7 @@
 # .work/ contiene node_modules con la libreria docx.
 .work/
 # Entorno virtual de Python con pymupdf fijado: cientos de MB, lo crea
-# scripts\instalar-entorno.ps1.
+# scripts/apa7.py install.
 .venv/
 venv/
 # Dependencias de Node. Normalmente viven dentro de .work/, pero si APA7_NODEDIR

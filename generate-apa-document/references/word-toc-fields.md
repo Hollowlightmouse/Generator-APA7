@@ -142,31 +142,41 @@ not from eyeballing it.
 
 ## PDF export with LibreOffice
 
-Script: `scripts/export-pdf.ps1`. It works on a temporary copy and creates an
-isolated user profile per run, so it does not clash with a LibreOffice session
-opened by the user.
+Command: `python scripts/apa7.py export --docx <docx>`. It works on a temporary
+copy and creates an isolated user profile per run, so it does not clash with a
+LibreOffice session opened by the user.
 
-```powershell
-& $soffice.com --headless --norestore --nolockcheck --nofirststartwizard `
-    -env:UserInstallation=file:///.../lo_profile_<id> `
-    --convert-to pdf:writer_pdf_Export --outdir <tmp> <docx>
+```python
+subprocess.call([soffice,
+                 "--headless", "--norestore", "--nolockcheck",
+                 "--nofirststartwizard",
+                 "-env:UserInstallation=file:///<tmp>/lo_profile_<id>",
+                 "--convert-to", "pdf:writer_pdf_Export",
+                 "--outdir", tmp_dir, docx],
+                stdout=log_file, stderr=log_file)
 ```
 
 **How it is invoked, and why not any other way.** Contradicting this part makes
 the script hang:
 
-- **Use `soffice.com`, not `soffice.exe`.** The `.exe` detaches and the child
-  process inherits the pipe handle, so PowerShell ends up reading forever.
-- **Do not use `Start-Process`.** If the parent process already redirects
-  output, the nested redirection leaves LibreOffice never finishing.
-- **The capture is `& $bin @args 2> $fichero`**, with `$ErrorActionPreference`
-  set to `Continue` for the duration of the call and restored afterwards.
-- **Never `2>&1 | Out-File`** together with `$ErrorActionPreference = 'Stop'`:
-  PowerShell throws `NativeCommandError` and aborts.
-- With .NET file redirection the process does not finish either (the child
-  leaves the streams open). That is why output is written to a file with `2>`.
-- The warning `Could not find platform independent libraries <prefix>` on
+- **Redirect stdout and stderr to files.** A child that inherits the caller's
+  pipe handle can keep `soffice` alive after the parent has finished, so a
+  reader on that pipe never sees EOF. That is what used to leave the pipeline
+  hanging with no output. The files are read after the process ends, then
+  deleted; the log is kept in `<outdir>/_logs/03-export.log`.
+- **Do not use a shell background operator or `Start-Process`.** A nested
+  redirection on top of an already-redirected parent leaves LibreOffice never
+  finishing.
+- **Do not switch to `soffice.exe` on Windows.** The `.exe` detaches; on
+  Windows the console wrapper `soffice.com` is what waits for the conversion.
+  On macOS and Linux the binary is just `soffice`.
+- **The warning `Could not find platform independent libraries <prefix>`** on
   stderr is **benign** and must not be treated as an error.
+- **Kill leftovers.** Before and after the run, any LibreOffice still running is
+  terminated, because a stale instance holds the profile lock and the next run
+  exits without converting anything. The run also has a hard timeout
+  (`--timeout`, 300 s) reported as exit code 124 rather than as a silent
+  failure.
 
 ## Verification checklist
 

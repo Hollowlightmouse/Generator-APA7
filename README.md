@@ -24,12 +24,14 @@ It is not a PDF-to-Word converter: it starts from a `.md` that already exists. W
 
 | Tool | What it is used for | How to get it |
 |---|---|---|
-| **PowerShell 5.1+** | running the skill scripts | included in Windows |
-| **Node.js LTS + npm** | generating the `.docx` with the `docx` library | `winget install OpenJS.NodeJS.LTS` or `brew install node` |
+| **Python 3.9+** | running the skill scripts | ships with macOS/Linux; `winget install Python.Python.3.12` or `brew install python@3.12` |
+| **Node.js LTS + npm** | generating the `.docx` with the `docx` library | `winget install OpenJS.NodeJS.LTS`, `brew install node`, or the distro package |
 | **`docx` library (npm)** | building the cover, TOC, indices and tables | `npm install docx@9.7.1 --no-save` |
-| **Python 3 + `pymupdf`** | verifying the final PDF | `pip install pymupdf` |
-| **LibreOffice** | **the only engine** for `.docx → .pdf` conversion | `winget install TheDocumentFoundation.LibreOffice` or `brew install --cask libreoffice` |
-| **Internet connection** | winget/brew, npm and pip downloads | — |
+| **`pymupdf` 1.28.2** | verifying the final PDF | installed into `.venv`, not into the system Python |
+| **LibreOffice** | **the only engine** for `.docx → .pdf` conversion | `winget install TheDocumentFoundation.LibreOffice`, `brew install --cask libreoffice`, or the distro package |
+| **Internet connection** | package manager, npm and pip downloads | — |
+
+Everything above except the internet is installed by `apa7.py install`, which picks the available package manager (`winget`, `brew`, `apt`, `dnf` or `pacman`) or prints the command to run by hand.
 
 The skill validates these tools automatically before touching the document (**STEP 0 / preflight**). If any is missing, it installs it; if something cannot be installed, it **stops and warns** without transforming the document.
 
@@ -40,15 +42,17 @@ Tool paths overridable by environment variable: `APA7_SOFFICE`, `APA7_PYTHON`, `
 1. **Copy the** `generate-apa-document/` **folder** into your AI agent's skills directory, so that `SKILL.md` ends up at the root of the skills directory. For example: `<your-user>\.agents\skills\generate-apa-document`.
 2. **The environment sets itself up.** The first time, run the preflight:
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File "...\generate-apa-document\scripts\comprobar-entorno.ps1"
+   ```bash
+   python scripts/apa7.py check
    ```
 
    If it returns `RESULT: MISSING`, the automatic installer resolves it and re-checks:
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File "...\generate-apa-document\scripts\instalar-entorno.ps1"
+   ```bash
+   python scripts/apa7.py install
    ```
+
+   Add `--dry-run` to see the plan without changing anything, and `--yes` when running unattended.
 
    > Do not install anything by hand and do not transform documents with missing tools.
 
@@ -87,24 +91,24 @@ Almost everything comes from your files. The skill will only ask you for the **d
 ## Workflow
 
 1. **Activation** — the user asks for an academic document in APA (by intent).
-2. **STEP 0 · Preflight** — `comprobar-entorno.ps1` checks the tools. If something is missing, `instalar-entorno.ps1` installs it and re-checks. If it does not return `RESULT: OK`, it stops and warns.
+2. **STEP 0 · Preflight** — `apa7.py check` checks the tools. If something is missing, `apa7.py install` installs it and re-checks. If it does not return `RESULT: OK`, it stops and warns.
 3. **Inputs** — the `.md` (mandatory), the images and the layout JSON (optional) are received.
-4. **Parser** — `md-a-manifiesto.py` turns `.md` + layout JSON into `MANIFEST.json`: it enriches, deduplicates, splits glued words, computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
+4. **Parser** — `apa7.py parse` turns `.md` + layout JSON into `MANIFEST.json`: it enriches, deduplicates, splits glued words, computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
 5. **Mandatory questions (STEP 0.5)** — if `pendientes_bloqueantes` is not empty, the user is asked (cover data, missing titles/captions, "no tables/figures" confirmation) and nothing is built until they are resolved. The cover answers are saved in `portada.json` and passed to the parser with `--portada`.
-6. **Build the `.docx`** — `build-docx.js` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references. Aborts with code 4 if a title or caption is missing.
-7. **Export to PDF** — `export-pdf.ps1` converts `.docx → .pdf` with headless LibreOffice (temporary copy + isolated profile per run).
-8. **Verify** — `verificar-pdf.py` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes above their image and hanging indent in references. If a critical check fails, it is fixed and exported again.
+6. **Build the `.docx`** — `apa7.py build` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references. Aborts with code 4 if a title or caption is missing.
+7. **Export to PDF** — `apa7.py export` converts `.docx → .pdf` with headless LibreOffice (temporary copy + isolated profile per run).
+8. **Verify** — `apa7.py verify` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes above their image and hanging indent in references. If a critical check fails, it is fixed and exported again.
 9. **Deliver** — both files are delivered (`.docx` and `.pdf`).
 
 ```
 Activation
-   └─ STEP 0  Environment preflight ──► (something missing) instalar-entorno.ps1 ──► re-check
+   └─ STEP 0  Environment preflight ──► (something missing) apa7.py install ──► re-check
         └─ Inputs: .md (+ images + layout JSON)
-             └─ md-a-manifiesto.py ──► MANIFEST.json (+ diagnostico)
+             └─ apa7.py parse ──► MANIFEST.json (+ diagnostico)
                   └─ STEP 0.5  Blocking pending questions? ──► (yes) ask the user
-                       └─ build-docx.js ──► document.docx
-                            └─ export-pdf.ps1 (headless LibreOffice) ──► document.pdf
-                                 └─ verificar-pdf.py ──► (failures) fix ──► re-export
+                       └─ apa7.py build ──► document.docx
+                            └─ apa7.py export (headless LibreOffice) ──► document.pdf
+                                 └─ apa7.py verify ──► (failures) fix ──► re-export
                                       └─ Delivery: .docx + .pdf
 ```
 
@@ -116,7 +120,7 @@ Activation
 - **Tables renderable in LibreOffice:** explicit width (`width` + `columnWidths` + `layout: FIXED`) and horizontal-only borders; without this, LibreOffice does not show them (known bug).
 - **Automatic per-table orientation:** a table that does not fit in portrait (6 or more columns, or very long cells) moves on its own to a **landscape page** with its title and note; afterwards the text returns to portrait. The criterion is legibility, not the number of rows.
 - **Figure note above the image; table note below the table** (APA 7 distinguishes them by position, not only by text).
-- **Clean export:** the resolved `soffice` binary is invoked directly (not via `Start-Process`), with an isolated LibreOffice profile per run and a temporary copy; the `Could not find platform independent libraries <prefix>` message on stderr is benign and ignored.
+- **Clean export:** the resolved `soffice` binary is invoked directly, with its output redirected to files (never to an inherited pipe), an isolated LibreOffice profile per run and a temporary copy. Leftover processes are closed before and after, and the run has a hard timeout reported as exit code 124 rather than as a silent failure. The `Could not find platform independent libraries <prefix>` message on stderr is benign and ignored.
 - **No embedded term lists:** the pipeline ships no whitelist of untouchable terms, because that data belongs to one concrete document and not to the tool. A camelCase term split by the deglue (`NodeJS` → `Node JS`) is corrected in the source `.md`; the residue report lists every stretch it could not separate.
 
 ## Repository structure
@@ -133,21 +137,22 @@ Generator-APA7/
     │   ├── word-toc-fields.md            # functional TOC/indices and docx/LibreOffice pitfalls
     │   └── system-requirements.md        # tools, preflight and path resolution
     ├── scripts/
-    │   ├── comprobar-entorno.ps1         # environment preflight (STEP 0)
-    │   ├── instalar-entorno.ps1          # auto-install of what is missing
-    │   ├── md-a-manifiesto.py            # .md + JSON → MANIFEST.json
-    │   ├── build-docx.js                 # MANIFEST.json → .docx
-    │   ├── export-pdf.ps1                # .docx → .pdf with LibreOffice
-    │   ├── verificar-pdf.py              # .pdf verification (pymupdf)
+    │   ├── apa7.py                      # entry point: check/install/export/parse/build/verify
+    │   ├── md-a-manifiesto.py            # .md + JSON → MANIFEST.json  (apa7.py parse)
+    │   ├── build-docx.js                 # MANIFEST.json → .docx        (apa7.py build)
+    │   ├── verificar-pdf.py              # .pdf verification (pymupdf) (apa7.py verify)
+    │   ├── tests/                       # unit tests
     │   └── lib/
-    │       └── rutas.ps1                 # portable path and tool resolution
+    │       ├── rutas.py                  # portable path and tool resolution
+    │       ├── instalador.py             # installation plans per package manager
+    │       └── fuentes.py                # font names accepted by the verifier
     ├── .work/                            # generated state (docx's node_modules)
     └── .venv/                            # generated state (pinned pymupdf)
 ```
 
 ## Limitations
 
-- **Windows / PowerShell 5.1+** (the scripts are designed for this environment).
+- **Windows, macOS and Linux.** The CLI is cross-platform: Python 3.9+ and no shell-specific syntax. The package managers (`apt`, `dnf`, `pacman`) and the Snap/Flatpak/Homebrew LibreOffice variants are resolved by the installer but have only been exercised on Windows so far.
 - It does not convert directly from PDF to Word: it starts from a `.md` already extracted by MinerU or Docling. The layout JSON is optional, but without it the figures do not keep their real size.
 - **APA 7 letter format with 1 in margins**, with no extra institutional rules.
 - The cover page carries no visible page number; numbering starts on page 2.
