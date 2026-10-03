@@ -207,6 +207,17 @@ def _remove_tree(path):
         shutil.rmtree(str(path), ignore_errors=True)
 
 
+def remove_tree(path):
+    """Delete a directory tree. True when it is gone afterwards.
+
+    Public counterpart of the internal helper: the exporter has to report
+    whether the isolated LibreOffice profile really went away, and reaching into
+    a private function from another module is how that question gets lost.
+    """
+    _remove_tree(path)
+    return not Path(path).exists()
+
+
 def kill_process_tree(pid):
     """Kill a process and its children (soffice -> soffice.bin).
 
@@ -244,6 +255,63 @@ def kill_process_tree(pid):
             os.kill(pid, _KILL_SIGNAL)
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Leftover LibreOffice processes
+# ---------------------------------------------------------------------------
+# soffice.bin survives a flat kill of the launcher and then makes the NEXT
+# --convert-to fail, and a leftover from a crashed run makes the new one hang
+# without saying why. Both the exporter and the installer clean these up first.
+_SOFFICE_IMAGES = ("soffice.exe", "soffice.bin", "soffice")
+
+
+def soffice_pids():
+    """PIDs of the LibreOffice processes currently running.
+
+    Best effort by nature: it shells out to tasklist or pgrep, and returns an
+    empty list when neither is usable rather than making an export fail over a
+    diagnostic that is only a nicety.
+    """
+    pids = []
+    mine = os.getpid()
+
+    if is_windows():
+        for image in ("soffice.exe", "soffice.bin"):
+            result = run(["tasklist", "/FI", "IMAGENAME eq %s" % image,
+                          "/NH", "/FO", "CSV"], timeout=30)
+            if result.exit_code != 0:
+                continue
+            for line in result.output:
+                fields = [f.strip('"') for f in line.split('","')]
+                if len(fields) < 2 or not fields[1].isdigit():
+                    continue
+                pid = int(fields[1])
+                if pid != mine and pid not in pids:
+                    pids.append(pid)
+    else:
+        result = run(["pgrep", "-f", "soffice"], timeout=30)
+        if result.exit_code == 0:
+            for line in result.output:
+                line = line.strip()
+                if line.isdigit():
+                    pid = int(line)
+                    if pid != mine and pid not in pids:
+                        pids.append(pid)
+
+    return pids
+
+
+def kill_soffice_processes():
+    """Kill every leftover LibreOffice process. Returns how many it killed."""
+    killed = 0
+    for pid in soffice_pids():
+        try:
+            kill_process_tree(pid)
+            killed += 1
+        except OSError:
+            pass
+    return killed
 
 
 # ---------------------------------------------------------------------------

@@ -249,6 +249,72 @@ class TestKillProcessTree(PlatformMixin, unittest.TestCase):
         killpg.assert_not_called()
 
 
+class TestLeftoverProcesses(PlatformMixin, unittest.TestCase):
+    """A soffice.bin that survives makes the NEXT --convert-to fail or hang."""
+
+    def test_windows_parses_the_tasklist_csv_row(self):
+        row = '"soffice.exe","4321","Console","1","25,000 K"'
+        with self.as_windows(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult([row], row, 0)):
+            self.assertEqual(rutas.soffice_pids(), [4321])
+
+    def test_posix_parses_the_pgrep_output(self):
+        with self.as_linux(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult(["111", "222"], "111", 0)):
+            self.assertEqual(rutas.soffice_pids(), [111, 222])
+
+    def test_our_own_pid_is_never_in_the_list(self):
+        import os as real_os
+        with self.as_linux(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult([str(real_os.getpid())], "", 0)):
+            self.assertEqual(rutas.soffice_pids(), [])
+
+    def test_duplicates_are_collapsed(self):
+        row = '"soffice.bin","77","Console","1","25,000 K"'
+        with self.as_windows(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult([row, row], row, 0)):
+            self.assertEqual(rutas.soffice_pids(), [77])
+
+    def test_a_missing_tool_is_an_empty_list_not_an_error(self):
+        with self.as_linux(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult(["pgrep: not found"], "", 127)):
+            self.assertEqual(rutas.soffice_pids(), [])
+
+    def test_kill_reports_how_many_it_killed(self):
+        with mock.patch.object(rutas, "soffice_pids", return_value=[1, 2, 3]), \
+                mock.patch.object(rutas, "kill_process_tree") as killer:
+            self.assertEqual(rutas.kill_soffice_processes(), 3)
+        self.assertEqual(killer.call_count, 3)
+
+    def test_one_failure_does_not_stop_the_others(self):
+        def boom(pid):
+            if pid == 2:
+                raise OSError("access denied")
+
+        with mock.patch.object(rutas, "soffice_pids", return_value=[1, 2, 3]), \
+                mock.patch.object(rutas, "kill_process_tree", side_effect=boom):
+            self.assertEqual(rutas.kill_soffice_processes(), 2)
+
+
+class TestRemoveTree(unittest.TestCase):
+    def test_it_reports_that_the_directory_is_gone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "tree" / "deep"
+            target.mkdir(parents=True)
+            (target / "file.txt").write_text("x", encoding="utf-8")
+            self.assertTrue(rutas.remove_tree(Path(tmp) / "tree"))
+            self.assertFalse((Path(tmp) / "tree").exists())
+
+    def test_removing_something_absent_is_still_true(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(rutas.remove_tree(Path(tmp) / "never-existed"))
+
+
 class TestFilterStderr(unittest.TestCase):
     """Only the known LibreOffice headless noise is discarded."""
 

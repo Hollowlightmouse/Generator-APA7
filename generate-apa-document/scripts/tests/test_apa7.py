@@ -7,6 +7,7 @@ MISSING.
 
 Standard library only, on purpose.
 """
+import argparse
 import ast
 import contextlib
 import io
@@ -261,6 +262,141 @@ def tempfile_workdir():
         yield Path(tmp)
 
 
+class TestExport(CheckHarness):
+    """stdout carries the artifact and nothing else, so the caller can use it."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.docx = self.dir / "doc.docx"
+        self.docx.write_bytes(b"PK\x03\x04fake")
+
+    def _args(self, **overrides):
+        values = {"docx": str(self.docx), "outdir": str(self.dir / "out"),
+                  "log": None, "timeout": 300}
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def _export(self, soffice_result, **overrides):
+        import argparse
+
+        def fake_run_soffice(arguments, timeout=300, log_dir=None):
+            # Create what LibreOffice would have created.
+            expected = Path(values.outdir) / (self.docx.stem + ".pdf")
+            if getattr(soffice_result, "exit_code", 0) == 0 and not getattr(
+                    soffice_result, "timed_out", False):
+                expected.parent.mkdir(parents=True, exist_ok=True)
+                expected.write_bytes(b"%PDF-1.4 fake")
+            return soffice_result
+
+        values = self._args(**overrides)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
+                mock.patch.object(rutas, "kill_soffice_processes", return_value=0), \
+                mock.patch.object(rutas, "run_soffice", fake_run_soffice):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = apa7.cmd_export(values)
+        return code, out.getvalue(), err.getvalue()
+
+    def _ok_result(self, **overrides):
+        profile = self.dir / "lo_profile"
+        profile.mkdir(parents=True, exist_ok=True)
+        values = {"exit_code": 0, "stdout": "convert ... -> doc.pdf", "stderr": "",
+                  "timed_out": False, "profile_path": str(profile)}
+        values.update(overrides)
+        return _ExportResult(values)
+
+    def test_a_successful_export_prints_only_the_pdf_path(self):
+        code, out, _ = self._export(self._ok_result())
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), str(self.dir / "out" / "doc.pdf"))
+        self.assertEqual(len(out.strip().splitlines()), 1)
+
+    def test_the_log_goes_to_stderr_and_to_a_file(self):
+        _, out, err = self._export(self._ok_result())
+        self.assertNotIn("PHASE 3", out)
+        self.assertIn("PHASE 3", err)
+        log_file = self.dir / "out" / "_logs" / "03-export.log"
+        self.assertTrue(log_file.is_file())
+        self.assertIn("PDF generated", log_file.read_text(encoding="utf-8"))
+
+    def test_a_missing_docx_fails_without_writing_to_stdout(self):
+        code, out, err = self._export(self._ok_result(), docx=str(self.dir / "nope.docx"))
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("does not exist", err)
+
+    def test_a_timeout_is_reported_as_a_timeout_not_as_a_missing_file(self):
+        # The order matters: a wedged LibreOffice diagnosed as "no PDF" sends
+        # the user to look for a path problem instead of a stuck process.
+        code, out, err = self._export(self._ok_result(timed_out=True, exit_code=124,
+                                                      stdout=""))
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("did not finish within", err)
+        self.assertIn("Raise --timeout", err)
+        self.assertLess(err.index("did not finish within"), err.index("was killed"))
+
+    def test_the_isolated_profile_is_removed_even_on_failure(self):
+        profile = self.dir / "lo_profile"
+        result = self._ok_result(timed_out=True, exit_code=124, stdout="")
+        self._export(result)
+        self.assertFalse(profile.exists(), "the temporary profile leaked")
+
+    def test_benign_libreoffice_noise_is_reported_as_ignored(self):
+        noise = "Could not find platform independent libraries C:\\Python\\312\n"
+        _, _, err = self._export(self._ok_result(stderr=noise))
+        self.assertIn("only benign LibreOffice noise (ignored)", err)
+
+    def test_a_real_stderr_line_is_surfaced(self):
+        noise = ("Warning: failed to launch javaldx\n"
+                 "Error: source file could not be loaded\n")
+        _, _, err = self._export(self._ok_result(stderr=noise))
+        self.assertIn("Error: source file could not be loaded", err)
+
+    def test_leftover_processes_are_cleaned_before_and_after(self):
+        calls = []
+        profile = self.dir / "lo_profile"
+        profile.mkdir(parents=True, exist_ok=True)
+        expected = self.dir / "out" / "doc.pdf"
+
+        def fake_run_soffice(arguments, timeout=300, log_dir=None):
+            expected.parent.mkdir(parents=True, exist_ok=True)
+            expected.write_bytes(b"%PDF")
+            calls.append("convert")
+            return self._ok_result()
+
+        with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
+                mock.patch.object(rutas, "kill_soffice_processes",
+                                  side_effect=lambda: calls.append("clean") or 0), \
+                mock.patch.object(rutas, "run_soffice", fake_run_soffice):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                apa7.cmd_export(self._args())
+        # clean -> convert -> clean
+        self.assertEqual(calls, ["clean", "convert", "clean"])
+
+    def test_a_missing_libreoffice_fails_before_running_anything(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(rutas, "soffice_console", return_value=None), \
+                mock.patch.object(rutas, "run_soffice") as run_soffice:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = apa7.cmd_export(self._args())
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        run_soffice.assert_not_called()
+        self.assertIn("apa7.py install", err.getvalue())
+
+
+class _ExportResult:
+    def __init__(self, values):
+        self.__dict__.update(values)
+        self.stderr = self.__dict__.get("stderr", "")
+        self.stdout = self.__dict__.get("stdout", "")
+
+
 class TestNoHardcodedPaths(CheckHarness):
     """Every machine-specific path has to be resolved, never written down."""
 
@@ -282,7 +418,7 @@ class TestNoHardcodedPaths(CheckHarness):
                 imported.add((node.module or "").split(".")[0])
         imported.discard("")
         self.assertTrue(imported)
-        allowed = {"argparse", "json", "os", "sys", "lib"}
+        allowed = {"argparse", "json", "os", "sys", "time", "datetime", "pathlib", "lib"}
         self.assertEqual(imported - allowed, set(),
                          "third-party import in apa7.py: %s" % (imported - allowed))
 

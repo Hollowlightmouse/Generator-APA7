@@ -39,6 +39,9 @@ import argparse
 import json
 import os
 import sys
+import time
+from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -218,6 +221,147 @@ def cmd_check(_args):
 
 
 # ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+def cmd_export(args):
+    """.docx -> .pdf with headless LibreOffice (the single engine).
+
+    Progress goes to stderr and the resulting PDF path goes to stdout, so the
+    caller can use it without having to parse a log. Both are also written to
+    the log file.
+
+    Three details that are not optional:
+
+    * An ISOLATED LibreOffice profile is used on every run (inside run_soffice).
+      With the real profile, an already-open LibreOffice makes the conversion
+      hang silently.
+    * Leftover soffice processes are killed first. A soffice.bin that survived
+      a previous run makes the next --convert-to fail or hang, with no message
+      explaining why.
+    * A timeout is reported BEFORE asking whether the PDF exists. A wedged
+      LibreOffice would otherwise be diagnosed as a missing output file, which
+      is a different problem with a different fix.
+    """
+    lines = []
+
+    def step(message, level="INFO"):
+        rutas.log("%s %s" % (level, message))
+        lines.append("[%s] %s %s" % (datetime.now().strftime("%H:%M:%S"), level, message))
+
+    code = 1
+    result = None
+    log_file = None
+
+    try:
+        docx = Path(args.docx).expanduser()
+        if not docx.is_file():
+            step("The .docx does not exist: %s" % docx, "FAIL")
+            return 1
+        docx = docx.resolve()
+
+        out_dir = Path(args.outdir).expanduser() if args.outdir else docx.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = out_dir.resolve()
+
+        log_dir = out_dir / "_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = Path(args.log).expanduser() if args.log else log_dir / "03-export.log"
+
+        expected = out_dir / (docx.stem + ".pdf")
+
+        step("=== PHASE 3: export to PDF with LibreOffice ===")
+        step("Skill root      : %s" % rutas.skill_root())
+        step("Workdir         : %s" % rutas.workdir())
+        step("Input (.docx)   : %s" % docx)
+        step("Expected output : %s" % expected)
+
+        if not rutas.soffice_console():
+            step("LibreOffice is not installed. Run: python scripts/apa7.py install", "FAIL")
+            return 1
+
+        leftovers = rutas.kill_soffice_processes()
+        if leftovers:
+            step("Cleaned up %d leftover LibreOffice process(es)" % leftovers)
+
+        if expected.exists():
+            expected.unlink()
+
+        arguments = ["--convert-to", "pdf:writer_pdf_Export", "--outdir", str(out_dir), str(docx)]
+        step("Running: soffice %s" % " ".join(arguments))
+
+        started = time.time()
+        try:
+            result = rutas.run_soffice(arguments, timeout=args.timeout, log_dir=str(log_dir))
+        except rutas.SofficeNotFound as exc:
+            step(str(exc), "FAIL")
+            return 1
+        elapsed = time.time() - started
+
+        step("soffice finished with code %d in %.1f s" % (result.exit_code, elapsed))
+
+        if result.stdout and result.stdout.strip():
+            step("stdout: %s" % " ".join(result.stdout.split()))
+        real = rutas.filter_stderr(result.stderr)
+        if result.stderr:
+            if not real:
+                step("stderr: only benign LibreOffice noise (ignored)")
+            else:
+                step("stderr with %d real line(s):" % len(real), "WARN")
+                for line in real:
+                    step("  " + line, "WARN")
+
+        if result.timed_out:
+            step("LibreOffice did not finish within %d s and was killed (exit code 124)."
+                 % args.timeout, "FAIL")
+            step("The conversion was aborted, not failed silently. Raise --timeout, or "
+                 "check whether a previous soffice process is stuck, and retry.", "FAIL")
+            killed = rutas.kill_soffice_processes()
+            if killed:
+                step("Killed %d leftover LibreOffice process(es) from the aborted run." % killed,
+                     "WARN")
+            return 1
+
+        if not expected.is_file():
+            step("The expected PDF was not produced: %s" % expected, "FAIL")
+            return 1
+
+        step("PDF generated: %s (%d bytes)" % (expected, expected.stat().st_size))
+        # The only thing on stdout: the caller gets the artifact, not a log.
+        sys.stdout.write("%s\n" % expected)
+        code = 0
+        return 0
+
+    except KeyboardInterrupt:
+        step("Interrupted.", "WARN")
+        return 130
+    except Exception as exc:  # noqa: BLE001 - a broken export must not traceback
+        step("Unexpected error: %s" % exc, "FAIL")
+        return 1
+    finally:
+        # The whole tree, not just the launcher: a soffice.bin child that
+        # survives makes the NEXT --convert-to fail.
+        rutas.kill_soffice_processes()
+
+        # The isolated profile is thousands of files. It is only useful during
+        # the conversion, so it is always removed; the .log files are kept
+        # because they are the useful diagnostics.
+        if result is not None and result.profile_path:
+            profile = Path(result.profile_path)
+            if profile.is_dir():
+                if rutas.remove_tree(profile):
+                    step("Temporary LibreOffice profile deleted: %s" % profile)
+                else:
+                    step("Could not delete the temporary profile %s" % profile, "WARN")
+
+        if log_file:
+            try:
+                log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                rutas.log("Log written: %s" % log_file)
+            except OSError as exc:
+                rutas.log("Could not write the log %s: %s" % (log_file, exc))
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main(argv=None):
@@ -231,6 +375,17 @@ def main(argv=None):
     check_parser = subparsers.add_parser(
         "check", help="preflight (STEP 0): verify every required tool")
     check_parser.set_defaults(handler=cmd_check)
+
+    export_parser = subparsers.add_parser(
+        "export", help=".docx -> .pdf with headless LibreOffice")
+    export_parser.add_argument("--docx", required=True, help="input .docx (required)")
+    export_parser.add_argument("--outdir", default=None,
+                               help="output folder (default: the .docx folder)")
+    export_parser.add_argument("--log", default=None,
+                               help="log file (default: <outdir>/_logs/03-export.log)")
+    export_parser.add_argument("--timeout", type=int, default=300,
+                               help="maximum wait in seconds (default: 300)")
+    export_parser.set_defaults(handler=cmd_export)
 
     args = parser.parse_args(argv)
     try:
