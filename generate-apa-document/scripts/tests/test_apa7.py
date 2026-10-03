@@ -11,7 +11,9 @@ import argparse
 import ast
 import contextlib
 import io
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -395,6 +397,146 @@ class _ExportResult:
         self.__dict__.update(values)
         self.stderr = self.__dict__.get("stderr", "")
         self.stdout = self.__dict__.get("stdout", "")
+
+
+class TestForwarding(CheckHarness):
+    """parse/build/verify must hand their arguments over untouched.
+
+    The dispatcher does not know the target script's options, so anything that
+    reshapes the argument list corrupts the command line. The regression this
+    guards against is silent: argparse.REMAINDER splits the list in two and
+    re-concatenating reorders it, so `--md a.md --out b.json` arrives as
+    `a.md --out b.json --md` and the target reports a missing value.
+    """
+
+    def call(self, argv, **probes):
+        self.calls = []
+
+        # Real files: cmd_forward checks is_file() before running anything, so
+        # imaginary paths would short-circuit every case.
+        scratch = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, scratch, True)
+        root = Path(scratch)
+        (root / "scripts").mkdir()
+        for name in ("md-a-manifiesto.py", "build-docx.js", "verificar-pdf.py"):
+            (root / "scripts" / name).write_text("", encoding="utf-8")
+        self.venv = str(root / ".venv" / "bin" / "python3")
+
+        defaults = {
+            "skill_script": lambda name: str(root / "scripts" / name),
+            "venv_python": str(root / ".venv" / "bin" / "python3"),
+            "python_works": True,
+            "node_path": "/usr/bin/node",
+            "skill_root": root,
+            "is_windows": False,
+            "is_macos": False,
+        }
+        defaults.update(probes)
+
+        def record(command):
+            self.calls.append([str(part) for part in command])
+            return 0
+
+        with contextlib.ExitStack() as stack:
+            for name, value in defaults.items():
+                # rutas exposes these as functions, so a plain literal would be
+                # stored where a callable is expected.
+                if callable(value):
+                    stack.enter_context(mock.patch.object(rutas, name, value))
+                else:
+                    stack.enter_context(
+                        mock.patch.object(rutas, name, mock.Mock(return_value=value)))
+            stack.enter_context(mock.patch.object(apa7.subprocess, "call", record))
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = apa7.main(argv)
+        return code, self.calls, out.getvalue(), err.getvalue()
+
+    def test_the_argument_order_survives_intact(self):
+        _, calls, _, _ = self.call(
+            ["parse", "--md", "a.md", "--out", "b.json", "--base-dir", "img"])
+        self.assertEqual(calls[0][2:],
+                         ["--md", "a.md", "--out", "b.json", "--base-dir", "img"])
+
+    def test_an_option_whose_value_looks_like_a_flag_stays_attached(self):
+        _, calls, _, _ = self.call(["verify", "--pdf", "--weird.pdf",
+                                    "--manifiesto", "m.json"])
+        self.assertEqual(calls[0][2:],
+                         ["--pdf", "--weird.pdf", "--manifiesto", "m.json"])
+
+    def test_help_reaches_the_target_script(self):
+        # The agent needs the REAL script's options; apa7.py's own help would
+        # list none of them.
+        _, calls, _, _ = self.call(["parse", "--help"])
+        self.assertIn("--help", calls[0])
+        self.assertTrue(calls[0][1].endswith("md-a-manifiesto.py"))
+
+    def test_parse_uses_the_current_interpreter(self):
+        _, calls, _, _ = self.call(["parse", "--md", "a.md"])
+        self.assertEqual(calls[0][0], sys.executable)
+
+    def test_build_runs_node_on_the_js_script(self):
+        _, calls, _, _ = self.call(["build", "--manifiesto", "m.json"])
+        self.assertEqual(calls[0][0], "/usr/bin/node")
+        self.assertTrue(calls[0][1].endswith("build-docx.js"))
+
+    def test_build_without_node_fails_before_running_anything(self):
+        code, calls, out, err = self.call(["build", "--manifiesto", "m.json"],
+                                          node_path=None)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
+        self.assertEqual(out, "")
+        self.assertIn("install --only node", err)
+
+    def test_verify_prefers_the_virtual_environment_interpreter(self):
+        # pymupdf lives in the venv, so running verify on any other interpreter
+        # either fails to import or silently uses another version.
+        code, calls, _, _ = self.call(["verify", "--pdf", "p.pdf"])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0][0], self.venv)
+        self.assertTrue(calls[0][1].endswith("verificar-pdf.py"))
+
+    def test_verify_warns_and_falls_back_when_the_venv_is_unusable(self):
+        code, calls, _, err = self.call(["verify", "--pdf", "p.pdf"],
+                                        venv_python=None)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0][0], sys.executable)
+        self.assertIn("WARNING", err)
+        self.assertIn("install --only pymupdf", err)
+
+    def test_verify_falls_back_when_the_venv_cannot_run(self):
+        code, calls, _, err = self.call(["verify", "--pdf", "p.pdf"],
+                                        python_works=False)
+        self.assertEqual(calls[0][0], sys.executable)
+        self.assertIn("WARNING", err)
+
+    def test_the_exit_code_of_the_target_script_is_propagated(self):
+        with mock.patch.object(apa7.subprocess, "call", return_value=3):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(apa7.main(["verify", "--pdf", "p.pdf"]), 3)
+
+    def test_no_arguments_prints_the_usage_and_exits_two(self):
+        for command in ("parse", "build", "verify"):
+            code, calls, out, err = self.call([command])
+            self.assertEqual(code, 2, command)
+            self.assertEqual(calls, [], command)
+            self.assertIn("Usage: python scripts/apa7.py " + command, err)
+
+    def test_a_missing_target_script_is_reported_not_raised(self):
+        code, calls, out, err = self.call(["parse", "--md", "a.md"],
+                                          skill_script=lambda name: "/nope/" + name)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("not found at", err)
+
+    def test_the_strict_subcommands_still_reject_unknown_arguments(self):
+        for command in (["check", "--bogus"], ["export", "--nope"],
+                        ["install", "--nope"]):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    apa7.main(command)
+            self.assertEqual(raised.exception.code, 2, command)
 
 
 class TestNoHardcodedPaths(CheckHarness):

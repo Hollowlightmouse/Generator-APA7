@@ -671,9 +671,126 @@ def _venv_executable(venv_dir):
 
 
 # ---------------------------------------------------------------------------
+# parse / build / verify
+#
+# Thin dispatchers. Each one knows only three things the caller would otherwise
+# have to know per platform: which interpreter runs the script, where the script
+# is, and how the workdir is wired. Every argument after the subcommand is
+# forwarded verbatim, so each underlying script stays the single source of truth
+# for its own options and --help still works.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# The subcommands that hand their arguments to another script instead of
+# parsing them. A dict, not a tuple: main() looks the handler up by name before
+# argparse runs, so the arguments reach the target script untouched.
+# ---------------------------------------------------------------------------
+def _forwarded(args):
+    """Every argument after the subcommand, in the order the user wrote it.
+
+    parse_known_args is required, not a shortcut: the dispatcher cannot know the
+    target script's options, so anything it does not recognise has to be
+    forwarded rather than rejected. That is also what makes `--help` reach the
+    real script.
+    """
+    return [str(argument) for argument in (list(getattr(args, "rest", []))
+                                          + list(getattr(args, "unknown", [])))]
+
+
+def _forward(rest, interpreter, script, label, usage):
+    if not rest:
+        sys.stderr.write("%s: no arguments.\nUsage: python scripts/apa7.py %s\n"
+                         % (label, usage))
+        return 2
+    if not Path(script).is_file():
+        sys.stderr.write("ERROR: %s not found at %s\n" % (label, script))
+        return 1
+    return subprocess.call([str(interpreter), str(script)] + list(rest))
+
+
+def cmd_parse(args):
+    """Markdown -> MANIFEST.json.
+
+    Needs no third-party package, so the current interpreter is enough.
+    """
+    return _forward(_forwarded(args), sys.executable,
+                    rutas.skill_script("md-a-manifiesto.py"), "parse",
+                    "parse --md FILE.md --out MANIFEST.json [options]")
+
+
+def cmd_build(args):
+    """MANIFEST.json -> .docx.
+
+    Needs Node.js. The script resolves the docx package from the workdir by
+    absolute path, so the working directory does not matter here.
+    """
+    node = rutas.node_path()
+    if not node:
+        sys.stderr.write("ERROR: Node.js not found.\nRun: "
+                         "python scripts/apa7.py install --only node\n")
+        return 1
+    return _forward(_forwarded(args), node, rutas.skill_script("build-docx.js"),
+                    "build",
+                    "build --manifiesto MANIFEST.json --out salida.docx [--log log.txt]")
+
+
+def cmd_verify(args):
+    """PDF + MANIFEST.json -> verification report.
+
+    This is the one that must NOT run on the caller's interpreter: pymupdf is
+    installed into the skill's .venv, so a system Python without it either
+    fails to import or, worse, imports a different version. The venv interpreter
+    is selected here so `verify` behaves the same however it is invoked.
+    """
+    interpreter = rutas.venv_python()
+    if not (interpreter and rutas.python_works(interpreter)):
+        sys.stderr.write(
+            "WARNING: no usable virtual environment at %s; running verify with "
+            "%s instead.\nIf pymupdf turns out to be missing, run: "
+            "python scripts/apa7.py install --only pymupdf\n"
+            % (rutas.skill_root() / ".venv", sys.executable))
+        interpreter = sys.executable
+    return _forward(_forwarded(args), interpreter,
+                    rutas.skill_script("verificar-pdf.py"), "verify",
+                    "verify --pdf salida.pdf --manifiesto MANIFEST.json [options]")
+
+
+# Filled in here rather than next to main(), because it has to name the
+# handlers, and those are not defined until here.
+FORWARDING = {
+    "parse": cmd_parse,
+    "build": cmd_build,
+    "verify": cmd_verify,
+}
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def _run(handler, args):
+    """Run a handler and turn the two expected interrupts into exit codes."""
+    try:
+        return handler(args)
+    except KeyboardInterrupt:
+        sys.stderr.write("Interrupted.\n")
+        return 130
+    except rutas.SofficeNotFound as exc:
+        sys.stderr.write("ERROR: %s\n" % exc)
+        return 1
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    # The forwarding subcommands take their arguments verbatim, and they are
+    # sliced off here rather than through argparse. argparse.REMAINDER splits
+    # them into two buckets -- the first option it recognises and the tail after
+    # it -- so putting them back together REORDERS the command line and turns
+    # `--md a.md --out b.json` into `a.md --out b.json --md`. Nothing warns about
+    # that; the target script just complains about a missing value.
+    if argv and argv[0] in FORWARDING:
+        handler = FORWARDING[argv[0]]
+        return _run(handler, argparse.Namespace(rest=argv[1:], unknown=[]))
+
     parser = argparse.ArgumentParser(
         prog="apa7.py",
         description="generate-apa-document: build an APA 7 .docx and .pdf.",
@@ -710,15 +827,20 @@ def main(argv=None):
         help="print what would be installed and change nothing")
     install_parser.set_defaults(handler=cmd_install)
 
+    # Registered only so that `apa7.py --help` lists them; the branch above
+    # handles them before argparse ever sees them.
+    subparsers.add_parser(
+        "parse", help="PHASE 1: .md -> MANIFEST.json (options are forwarded)",
+        add_help=False)
+    subparsers.add_parser(
+        "build", help="PHASE 2: MANIFEST.json -> .docx (options are forwarded)",
+        add_help=False)
+    subparsers.add_parser(
+        "verify", help="PHASE 4: check the PDF against the manifest "
+                       "(options are forwarded)", add_help=False)
+
     args = parser.parse_args(argv)
-    try:
-        return args.handler(args)
-    except KeyboardInterrupt:
-        sys.stderr.write("Interrupted.\n")
-        return 130
-    except rutas.SofficeNotFound as exc:
-        sys.stderr.write("ERROR: %s\n" % exc)
-        return 1
+    return _run(args.handler, args)
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ const RUTA_DOCX = path.join(WORKDIR, "node_modules", "docx");
 if (!fs.existsSync(RUTA_DOCX)) {
   console.error("FAILURE: the 'docx' package was not found in");
   console.error("       " + RUTA_DOCX);
-  console.error("Run scripts\\instalar-entorno.ps1 to install it in the skill's workdir.");
+  console.error("Run scripts/apa7.py install to install it in the skill's workdir.");
   process.exit(3);
 }
 
