@@ -10,96 +10,134 @@ trip over the same already-fixed problems again.
 
 ## The golden rule
 
-LibreOffice recalculates the page numbers when it opens the document, but it
-**does not build an empty `TOC` field from scratch** (it ignores the
-update-fields option for that) and **it does not resolve `SEQ` fields**. So:
+LibreOffice evaluates the fields it finds, but it **does not build an empty
+`TOC` field from scratch** (it ignores the update-fields option for that). A
+`TOC` field with no computed result exports **empty**. A `TOC` field whose
+result is already cached in the document, on the other hand, exports **exactly
+as cached**. So the indexes are real `TOC` fields, and their result is filled in
+by a two-pass build:
 
-- The **table of contents** is generated as **literal entries**: the heading
-  text, a dot-leader tab and the page number through a `PAGEREF` field.
-- Table and figure **captions** carry a **literal number** ("Tabla 1"), not a
-  `SEQ` field.
-- The **page numbers** in the table of contents and in the indexes are real
-  `PAGEREF` fields, which LibreOffice does resolve (bookmark -> page). That is
-  why the indexes stay live: if the content moves to a different page, the
-  number updates when the document is reopened.
+1. `build` creates the `.docx` once (indexes without page numbers).
+2. `apa7.py` exports that `.docx` to a throwaway PDF with LibreOffice, and
+   `scripts/paginas-de-pdf.py` reads the real page of every entry from it.
+3. `build-docx.js` runs a second time with `--paginas-json`, and that map
+   becomes the **cached result** of the `TOC` fields.
+
+The double pass lives inside `python scripts/apa7.py build`, so the documented
+pipeline does not change. If the venv or LibreOffice is missing, the first
+`.docx` is kept and Word fills the numbers in when the document is opened
+(`features.updateFields`); it is a degradation, not a failure.
+
+Verified against LibreOffice 26.8 on Windows with `docx` 9.7.1:
+
+| Test | Result |
+|------|--------|
+| `TOC` field with no result | exports **empty** (LO does not build it) |
+| `TOC` field whose `contentChildren` are PAGEREF lines | entries render, the nested PAGEREF is **not** resolved |
+| `TOC` field with `cachedEntries` (literal pages) | renders correctly, with dot leaders |
+| `SEQ` field in a caption / body | **resolved** (`Tabla ` + `SEQ Tabla` -> `Tabla 1`) |
+| `TOC \u` / `TOC \o` / `TOC \c "Tabla"` instrText | emitted as real fields |
+| `doc.get_toc()` after export | PDF outline from the applied outline levels, with correct pages |
+
+Consequences that must not be undone:
+
+- Each **heading** carries an applied **outline level** (`outlineLevel`): that
+  is what `TOC \u` collects and what LibreOffice turns into PDF bookmarks, which
+  is how the double pass learns each section's page.
+- Each **caption** carries a real **`SEQ` field** (`SEQ Tabla`, `SEQ Figura`),
+  not a literal number: `TOC \c "Tabla"` only collects captions with that SEQ.
+- The `PAGEREF` recipe that used to build the TOC by hand is **gone**: a
+  hand-made list is not a field and Word cannot update it.
 
 ## Recipes that work
 
-### 1. Bookmarks on each heading
+### 1. Heading with outline level and bookmark
 
-After parsing the markdown, each heading is numbered according to its order of
-appearance and its run is wrapped in a `_H<id>` bookmark:
+Each heading carries an applied `outlineLevel` (0-based) and a bookmark. The
+outline level is what `TOC \u` collects and what LibreOffice exports as a PDF
+bookmark, which is how the double pass measures the section's page:
 
 ```js
-case 'h1': return para({ heading: d.HeadingLevel.HEADING_1, /* ... */ },
-  [new d.Bookmark({ id: '_H' + b.hid,
-     children: [new d.TextRun({ text: b.text, bold: true })] })]);
+new Paragraph({
+  outlineLevel: nivel - 1,          // nivel 1..5 -> 0..4
+  children: [new Bookmark({
+    id: 'apa_sec_' + hid,
+    children: runsDe(segmentos, estilo),
+  })],
+});
 ```
 
-The `_H` prefix is required because Word and LibreOffice do not accept bookmark
-names that start with a digit.
+### 2. Table of contents as a real `TOC` field
 
-### 2. Table of contents entry with PAGEREF
-
-Use the real `TOC 1` / `TOC 2` paragraph styles declared in the `Document` (so
-that LibreOffice and Word read the APA format) and a right-aligned dot-leader
-tab stop:
+The `TableOfContents` class emits a real `TOC` field (`w:instrText`), with the
+result cached. `useAppliedParagraphOutlineLevel: true` adds `\u`:
 
 ```js
-function tocEntry(entry) {
-  return para({ style: entry.level === 1 ? 'TOC1' : 'TOC2',
-                spacing: { before: 0, after: 0, line: 480 },
-                tabStops: [{ type: d.TabStopType.RIGHT, position: 9350,
-                             leader: d.LeaderType.DOT }],
-                alignment: d.AlignmentType.LEFT },
-    [new d.TextRun({ text: entry.text }),
-     new d.TextRun({ children: [new d.Tab()] }),
-     new d.SimpleField('PAGEREF _H' + entry.hid + ' \\h')]);
-}
+const entradas = M.secciones.map((s) => ({
+  title: s.texto, level: s.nivel,
+  page: paginaDe('secciones', s.hid),   // from --paginas-json, may be undefined
+  href: 'apa_sec_' + s.hid,
+}));
+
+new TableOfContents('Contenido', {
+  hyperlink: true,
+  useAppliedParagraphOutlineLevel: true, // -> TOC \h \u
+  beginDirty: true,
+  cachedEntries: entradas,
+});
 ```
 
-Styles in the document, with `spacing` inside **`paragraph`** and not at the
-style root level (at root level the library fails):
+`cachedEntries` are rendered by the library as `TOC1..TOC5` paragraphs with a
+right dot-leader tab stop and the literal page. Those styles are declared in the
+`Document` so the indexes stay Times 12, double spaced:
 
 ```js
-features: { updateFields: true },
 styles: {
-  default: { document: { run: { font: 'Times New Roman', size: 24 } } },
-  paragraphStyles: [
-    { id: 'TOC1', name: 'TOC 1', basedOn: 'Normal',
-      run: { font: 'Times New Roman', size: 24, bold: false, color: '000000' },
-      paragraph: { spacing: { line: 480 } } },
-  ],
+  default: { document: { run: { font: 'Times New Roman', size: 24 },
+                         paragraph: { spacing: { line: 480 } } } },
+  paragraphStyles: Array.from({ length: 5 }, (_, i) => ({
+    id: 'TOC' + (i + 1), name: 'TOC ' + (i + 1), quickFormat: true,
+    run: { font: 'Times New Roman', size: 24, bold: i === 0 },
+    paragraph: { spacing: { line: 480 }, indent: { left: i * 720 } },
+  })),
+  characterStyles: [{ id: 'IndexLink', name: 'Index Link',
+                      run: { font: 'Times New Roman', size: 24, color: '000000' } }],
 },
 ```
 
-`features: { updateFields: true }` is what makes LibreOffice evaluate the
-existing fields on open. It is not a LibreOffice pass of its own: what it does
-is write `w:updateFields` into the `.docx`.
+`features: { updateFields: true }` writes `w:updateFields` into the `.docx`, so
+Word offers to recalculate the fields on open. LibreOffice, on export, uses the
+cached result instead of rebuilding.
 
 ### 3. Indice de tablas y de figuras
 
-Same scheme as the table of contents: a bookmark on the caption number, literal
-number and title, and `PAGEREF` for the page.
+Same field, different switch: `captionLabelIncludingNumbers` adds `\c "Tabla"`
+(`TOC \c "Tabla" \h`). It collects captions that carry a `SEQ Tabla` field, so
+the caption number must be a real SEQ, not a literal:
 
 ```js
-new d.Bookmark({ id: '_Tabla' + n,
-  children: [new d.TextRun({ bold: true, children: ['Tabla ' + n] })] })
+// caption label in the body
+new Bookmark({ id: 'apa_tbl_' + n, children: [
+  new TextRun({ text: 'Tabla ', bold: true }),
+  new SimpleField(' SEQ Tabla \\* ARABIC ', String(n)),   // cached -> "Tabla 1"
+]})
+
+// list of tables
+new TableOfContents('Tablas', {
+  hyperlink: true,
+  captionLabelIncludingNumbers: 'Tabla',   // -> TOC \c "Tabla" \h
+  beginDirty: true,
+  cachedEntries: tablasEntradas,
+});
 ```
 
-```js
-para({ spacing: { before: 0, after: 0, line: 480 },
-       alignment: d.AlignmentType.LEFT,
-       tabStops: [{ type: d.TabStopType.RIGHT, position: 9350,
-                    leader: d.LeaderType.DOT }] },
-  [new d.TextRun({ children: ['Tabla ' + n, '  ', title] }),
-   new d.TextRun({ children: [new d.Tab()] }),
-   new d.SimpleField('PAGEREF _Tabla' + n + ' \\h')])
-```
+Figures use `SEQ Figura` / `captionLabelIncludingNumbers: 'Figura'`.
 
-The caption goes in **a single paragraph** with a line break between the number
-and the title: that way the number stays bold on its own line and the title is
-italic on the next one, which is what APA asks for.
+The caption number and the title stay in **separate paragraphs**, which is what
+APA asks for (bold number on its own line, italic title next). Because of that,
+a user who updates the index fields **in Word** will get only the numbers in the
+lists of tables/figures (Word's `\c` collects the caption paragraph); the
+cached result, which is what the PDF ships, keeps the full "Tabla N. Titulo".
 
 **The index is only generated if there are items to index.** If the document
 has no tables, no table index is created; if it has no figures, no figure index
@@ -136,9 +174,16 @@ not from eyeballing it.
   `Array.prototype.flat()` **flattens only one level**: the nested array is
   serialized as `<0/>` and **the document does not open**. Use spread
   (`[...helper(), tabla, nota]`) or `.flat(2)`.
-- The library's `TableOfContents` is not useful here: LibreOffice ignores the
-  empty `TOC` field. The literal entry from recipe 2 is used instead.
+- The library's `TableOfContents` **is** used, but only with `cachedEntries`:
+  the empty `TOC` field exports empty. The cached entries are the two-pass
+  result and must be filled in (otherwise the field has no result to export).
 - `spacing` in a paragraph style goes in `paragraph.spacing`.
+- The switch mapping comes from `index.cjs` (`captionLabel` -> `\a "X"`,
+  `captionLabelIncludingNumbers` -> `\c "X"`, `tcFieldIdentifier` -> `\f`,
+  `headingStyleRange` -> `\o`, `useAppliedParagraphOutlineLevel` -> `\u`,
+  `hyperlink` -> `\h`). The instruction order puts `\c`/`\a`/`\b`/`\d`/`\f`
+  before `\h` and `\l`/`\n`/`\o`/`\p` after it, which is why the emitted
+  instrText reads `TOC \c "Tabla" \h` and `TOC \h \u`.
 
 ## PDF export with LibreOffice
 
@@ -172,11 +217,38 @@ the script hang:
   On macOS and Linux the binary is just `soffice`.
 - **The warning `Could not find platform independent libraries <prefix>`** on
   stderr is **benign** and must not be treated as an error.
-- **Kill leftovers.** Before and after the run, any LibreOffice still running is
-  terminated, because a stale instance holds the profile lock and the next run
-  exits without converting anything. The run also has a hard timeout
+- **Clean only our own leftovers.** Before and after the run, the skill closes
+  the LibreOffice processes whose command line carries the isolated
+  `lo_profile`, i.e. its own interrupted runs (a stale `soffice.bin` holds the
+  profile lock and makes the next run do nothing). The user's LibreOffice is
+  **not** touched: the isolated profile already makes coexistence safe. If a
+  foreign instance really has to be closed, `export --cerrar-libreoffice` does
+  it and warns that unsaved documents are lost. The run also has a hard timeout
   (`--timeout`, 300 s) reported as exit code 124 rather than as a silent
-  failure.
+  failure, and on timeout only the process tree it launched is killed.
+
+## Measuring the pages (the double pass)
+
+`scripts/paginas-de-pdf.py` reads the throwaway PDF and writes the page map that
+the second `build` consumes:
+
+```bash
+python scripts/paginas-de-pdf.py --pdf <tmp>/salida.pdf \
+    --manifiesto <manifiesto.json> --out <tmp>/paginas.json
+```
+
+- **Sections**: `doc.get_toc()` returns the PDF outline built from the applied
+  outline levels, with **1-based** pages. Each manifest section is matched to
+  the next outline entry whose normalized title matches; a title that is missing
+  from the outline does not shift the following sections.
+- **Tables and figures**: the first `Tabla N` / `Figura N` at or after the start
+  of the body. A line that starts with `Tabla 1. ...` in the list of tables is
+  inside the front matter, so it is ignored.
+- **Body start**: first page after the index pages, or the page before the first
+  section as a fallback.
+- If the manifest or PyMuPDF is missing it still exits 0 with an empty map; only
+  a missing PDF is an error (exit 1). An empty map degrades to Word filling the
+  numbers on open.
 
 ## Verification checklist
 
@@ -188,6 +260,7 @@ On the resulting PDF:
       with the correct number, and only if the document has those elements.
 - [ ] Tables with content (an empty landscape page is the symptom of the
       `columnWidths` problem).
-- [ ] Captions with number and title, in a single paragraph.
+- [ ] Captions with number (bold, own paragraph) and italic title (next
+      paragraph).
 - [ ] Referencias with hanging indent.
 - [ ] No blank pages between the table of contents and the body.

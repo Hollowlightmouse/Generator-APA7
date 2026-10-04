@@ -202,6 +202,80 @@ GLUE_NUM_PALABRA_RE = re.compile(
     r"|(?:de|del|la|el|los|las|un|una|y|en|con|para|por)\b)")
 
 
+# Structural protection: before any rule runs, URLs, DOIs, e-mails and file
+# names with an extension are set aside behind a sentinel and put back at the
+# end, byte for byte. A URL query string ('?v=dQw4w9WgXcQ') must never be
+# touched: splitting it corrupts the link. These never show up in the change
+# report because there was no change.
+RE_MASCARA = re.compile(
+    r"https?://[^\s<>()\"']+"
+    r"|www\.[^\s<>()\"']+"
+    r"|\b10\.\d{4,9}/[^\s<>()\"']+"
+    r"|\b[\w.+-]+@[\w-]+\.[\w.-]+\b"
+    r"|\b[\w./\\-]+\.(?:md|txt|json|png|jpg|jpeg|gif|bmp|pdf|docx|xlsx|pptx"
+    r"|csv|tsv|zip|js|py|html|css|xml|yml|yaml|sql|sh|bat)\b",
+    re.I,
+)
+
+# Terms the document marks as untouchable (one per line, via
+# --terminos-protegidos). They are matched as a full token, case-sensitively,
+# and masked like the structural patterns. They are set from main().
+TERMINOS_PROTEGIDOS = []
+
+
+def _mascara(text):
+    """(text_with_sentinels, saved_fragments) for URLs/DOIs/e-mails/files/terms."""
+    spans = [(m.start(), m.end()) for m in RE_MASCARA.finditer(text)]
+    for term in TERMINOS_PROTEGIDOS:
+        if not term:
+            continue
+        patron = re.compile(r"(?<![0-9A-Za-z_])" + re.escape(term) + r"(?![0-9A-Za-z_])")
+        for m in patron.finditer(text):
+            spans.append((m.start(), m.end()))
+    if not spans:
+        return text, []
+    spans.sort()
+    fusion = []
+    for s, e in spans:
+        if fusion and s <= fusion[-1][1]:
+            fusion[-1] = (fusion[-1][0], max(fusion[-1][1], e))
+        else:
+            fusion.append((s, e))
+    guardados = []
+    partes = []
+    ult = 0
+    for s, e in fusion:
+        partes.append(text[ult:s])
+        guardados.append(text[s:e])
+        # The sentinel uses NUL bytes on purpose: NUL is in none of the rule
+        # character classes, so no rule can match or alter it.
+        partes.append("\x00%d\x00" % (len(guardados) - 1))
+        ult = e
+    partes.append(text[ult:])
+    return "".join(partes), guardados
+
+
+def _desmascara(text, guardados):
+    if not guardados:
+        return text
+    return re.sub(r"\x00(\d+)\x00", lambda m: guardados[int(m.group(1))], text)
+
+
+def _ambiguo(token):
+    """True when a split could be a legitimate term rather than a glued error.
+
+    Mixed alphanumerics ('SHA256', 'IPv6', 'Base64') and camelCase
+    ('JavaScript', 'GitHub') land here: they are the cases that must be
+    reviewed before accepting the correction, because they may well be the
+    real spelling of a product or a variable.
+    """
+    tiene_letra = bool(re.search(r"[A-Za-z\u00c0-\u00ff]", token))
+    tiene_num = bool(re.search(r"\d", token))
+    camel = bool(re.search(
+        r"[a-z\u00f1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00e0][A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc]", token))
+    return (tiene_letra and tiene_num) or camel
+
+
 def deglue(text, apply=True):
     """
     Inserts spaces in words glued together by the PDF-to-text conversion.
@@ -212,25 +286,32 @@ def deglue(text, apply=True):
       'ACTIVIDAD4'                         -> 'ACTIVIDAD 4'
       '2:Diferenciacion'                   -> '2: Diferenciacion'
 
-    What is NOT split:
-      Pure UPPERCASE acronyms ('OWASP', 'CVSS'): the rule requires lowercase
-      followed by uppercase, so they are already safe.
+    Protected before the rules run and restored unchanged afterwards: URLs,
+    DOIs, e-mails, file names with an extension, and every term listed in the
+    protected-terms file. They never appear in the change report.
 
-    There is no term list protecting camelCase names ('NodeJS' -> 'Node JS').
-    That trade is deliberate: a list of untouchable terms is data of one
-    concrete document, it never belongs to the pipeline, and a generic default
-    list in the code would contaminate every other document. Every change is
-    reported, so a term wrongly split is fixed in the source .md.
+    Pure UPPERCASE acronyms ('OWASP', 'CVSS') are not split: the rule requires
+    lowercase followed by uppercase.
 
-    Returns (corrected_text, list_of_changes) so that they can be reported.
+    Every change is reported with a flag: `True` when it is AMBIGUOUS (mixed
+    alphanumeric or camelCase, i.e. it could be a product name or a variable),
+    `False` when it is a clear correction. The pipeline does NOT decide: the
+    agent reads the report and either keeps the correction, adds the term to
+    the protected list and re-runs, or asks the user.
+
+    Returns (corrected_text, list_of_changes), each change being
+    (kind, before, after, ambiguous).
     """
     cambios = []
     if not apply or not text:
         return text, cambios
 
+    # Set the protected fragments aside so no rule can touch them.
+    text, guardados = _mascara(text)
+
     def sub_glue(m):
         a, b = m.group(1), m.group(2)
-        cambios.append(("glue", m.group(0), a + " " + b))
+        cambios.append(("glue", m.group(0), a + " " + b, _ambiguo(m.group(0))))
         return a + " " + b
 
     # The order matters. GLUE_RE goes first because it sees 'SegunelMarco'; but it splits
@@ -239,23 +320,28 @@ def deglue(text, apply=True):
     # are all evaluated against 'text' and chained in the inverse order
     # of application.
     def sub_sigla_y(m):
-        cambios.append(("sigla_y", m.group(0), m.group(1) + " " + m.group(2) + " " + m.group(3)))
+        cambios.append(("sigla_y", m.group(0), m.group(1) + " " + m.group(2) + " " + m.group(3),
+                        _ambiguo(m.group(0))))
         return m.group(1) + " " + m.group(2) + " " + m.group(3)
 
     def sub_acr(m):
-        cambios.append(("sigla", m.group(0), m.group(1) + " " + m.group(2)))
+        cambios.append(("sigla", m.group(0), m.group(1) + " " + m.group(2),
+                        _ambiguo(m.group(0))))
         return m.group(1) + " " + m.group(2)
 
     def sub_num_palabra(m):
-        cambios.append(("num_palabra", m.group(0), m.group(0) + " "))
+        cambios.append(("num_palabra", m.group(0), m.group(0) + " ",
+                        _ambiguo(m.group(0))))
         return m.group(0) + " "
 
     def sub_num(m):
-        cambios.append(("glue_num", m.group(0), m.group(1) + " " + m.group(2)))
+        cambios.append(("glue_num", m.group(0), m.group(1) + " " + m.group(2),
+                        _ambiguo(m.group(0))))
         return m.group(1) + " " + m.group(2)
 
     def sub_palabra_num(m):
-        cambios.append(("palabra_num", m.group(0), m.group(1) + " " + m.group(2)))
+        cambios.append(("palabra_num", m.group(0), m.group(1) + " " + m.group(2),
+                        _ambiguo(m.group(0))))
         return m.group(1) + " " + m.group(2)
 
     out = GLUE_NUM_PALABRA_RE.sub(sub_num_palabra, text)
@@ -266,16 +352,18 @@ def deglue(text, apply=True):
     out = GLUE_RE.sub(sub_glue, out)
 
     def sub_colon(m):
-        cambios.append(("colon", m.group(0), m.group(0) + " "))
+        cambios.append(("colon", m.group(0), m.group(0) + " ", False))
         return m.group(0) + " "
 
     out = COLON_RE.sub(sub_colon, out)
 
     def sub_paren(m):
-        cambios.append(("paren", m.group(0), m.group(1) + " (" + m.group(2) + ")"))
+        cambios.append(("paren", m.group(0), m.group(1) + " (" + m.group(2) + ")",
+                        _ambiguo(m.group(0))))
         return m.group(1) + " (" + m.group(2) + ")"
 
     out = PAREN_RE.sub(sub_paren, out)
+    out = _desmascara(out, guardados)
     return out, cambios
 
 
@@ -1373,6 +1461,12 @@ def main():
 
     ap.add_argument("--portada", help="portada.json with the user's answers")
     ap.add_argument("--sin-deglue", action="store_true", help="do not split glued words")
+    ap.add_argument("--terminos-protegidos", metavar="ARCHIVO",
+                    help="text file with one protected term per line (exact, "
+                         "case-sensitive). Terms are never split by deglue: use it "
+                         "for product names and variables such as JavaScript, "
+                         "GitHub, SHA256 or NodeJS. Blank lines and lines starting "
+                         "with '#' are ignored")
     ap.add_argument("--titulos-tabla-json", help="JSON {index: title} from the agent")
     ap.add_argument("--titulos-figura-json", help="JSON {index: title} from the agent")
     ap.add_argument("--notas-tabla-json",
@@ -1395,6 +1489,16 @@ def main():
     ap.add_argument("--ancho-max-tabla", type=float, default=6.5,
                     help="usable width in inches (Letter with 1-inch margins)")
     args = ap.parse_args()
+
+    global TERMINOS_PROTEGIDOS
+    if args.terminos_protegidos:
+        if not os.path.isfile(args.terminos_protegidos):
+            print("ERROR: the protected-terms file does not exist: %s"
+                  % args.terminos_protegidos, file=sys.stderr)
+            return 2
+        with open(args.terminos_protegidos, "r", encoding="utf-8") as fh:
+            TERMINOS_PROTEGIDOS = [ln.strip() for ln in fh
+                                   if ln.strip() and not ln.lstrip().startswith("#")]
 
     log_lines = []
 
@@ -1448,14 +1552,30 @@ def main():
     log("")
 
     if res["cambios_deglue"]:
+        ambiguos = [c for c in res["cambios_deglue"] if c[3]]
+        claros = [c for c in res["cambios_deglue"] if not c[3]]
         log("--- Glued words correction (%d changes) ---" % len(res["cambios_deglue"]))
-        vistos = set()
-        for tipo, antes, despues in res["cambios_deglue"]:
-            clave = (antes, despues)
-            if clave in vistos:
-                continue
-            vistos.add(clave)
-            log("  %-9s %-34s -> %s" % (tipo, antes, despues))
+        if claros:
+            log("  Clear corrections (%d):" % len(claros))
+            vistos = set()
+            for tipo, antes, despues, _ in claros:
+                clave = (antes, despues)
+                if clave in vistos:
+                    continue
+                vistos.add(clave)
+                log("    %-9s %-34s -> %s" % (tipo, antes, despues))
+        if ambiguos:
+            log("  REVIEW these (%d) - mixed alphanumeric / camelCase, they may be"
+                % len(ambiguos))
+            log("  real product names or variables. Protect them with"
+                " --terminos-protegidos and re-run if so:")
+            vistos = set()
+            for tipo, antes, despues, _ in ambiguos:
+                clave = (antes, despues)
+                if clave in vistos:
+                    continue
+                vistos.add(clave)
+                log("    %-9s %-34s -> %s" % (tipo, antes, despues))
         log("")
 
     log("--- Detected sections ---")

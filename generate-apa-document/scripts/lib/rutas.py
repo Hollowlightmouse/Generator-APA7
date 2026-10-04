@@ -28,6 +28,7 @@ Supported environment variables (all optional):
 """
 import os
 import platform
+import shlex
 import shutil
 import signal
 import subprocess
@@ -45,8 +46,10 @@ from pathlib import Path
 # restriction. The preflight compares what is installed against these values and
 # says so in its detail.
 #
-# pymupdf is pinned because verificar-pdf.py calls its API directly. Above 1.24.3
-# the top-level module is `pymupdf` and the `fitz` alias no longer exists.
+# pymupdf is pinned because verificar-pdf.py calls its API directly. Since
+# 1.24.3 the top-level module is `pymupdf`; the old `fitz` alias still imports
+# (checked on 1.28.2) but prints a deprecation warning, so the code imports
+# `pymupdf` and only falls back to `fitz` in the tests, for older installs.
 DEPS = {
     "docx": "9.7.1",
     "pymupdf": "1.28.2",
@@ -129,15 +132,46 @@ def skill_script(name):
     return path
 
 
-def workdir():
-    """Generated working directory. Created even in a dry run.
+def comando_apa7(*arguments):
+    """A copy-pasteable command that runs THIS skill with THIS interpreter.
 
-    An empty working directory is scratch state, not an installation, so a
-    dry run must not suppress it: the probes that follow expect it to exist.
+    "python scripts/apa7.py ..." is a guess: on macOS and many Linux
+    distributions there is no `python`, only `python3` (or `py` on Windows).
+    sys.executable is the interpreter already running, so it is guaranteed to
+    work here. The path is quoted for the current shell. Built without
+    skill_script() on purpose: this is used from error messages, where a
+    missing file must not turn into a different exception.
+    """
+    parts = [sys.executable, str(skill_root() / "scripts" / "apa7.py")]
+    parts += [str(argument) for argument in arguments]
+    if is_windows():
+        return subprocess.list2cmdline(parts)
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+# Set while `install --dry-run` is running. There is exactly one gate that is
+# supposed to make a dry run safe (_confirm), but workdir() was reached (and
+# created) before that gate, so the flag lives here where every helper sees it.
+_DRY_RUN = False
+
+
+def set_dry_run(active):
+    """Tell workdir() whether a --dry-run is in progress (process-wide)."""
+    global _DRY_RUN
+    _DRY_RUN = bool(active)
+
+
+def workdir():
+    """Generated working directory. Nothing is created during a dry run.
+
+    The directory itself is scratch state, not an installation, but `--dry-run`
+    promises to create nothing at all, so while the flag is set this only
+    reports where the directory WOULD be.
     """
     override = os.environ.get("APA7_WORKDIR")
     path = Path(override).expanduser() if override else skill_root() / ".work"
-    path.mkdir(parents=True, exist_ok=True)
+    if not _DRY_RUN:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -265,14 +299,73 @@ def kill_process_tree(pid):
 # without saying why. Both the exporter and the installer clean these up first.
 _SOFFICE_IMAGES = ("soffice.exe", "soffice.bin", "soffice")
 
+# Directory name of the isolated profile every run creates (see run_soffice).
+# It is what tells the skill's own leftover processes from the user's: no real
+# user profile is ever named like this, so cleanup can be limited to ours.
+SOFFICE_PROFILE_NAME = "lo_profile"
 
-def soffice_pids():
+
+def _pids_con_perfil(perfil):
+    """PIDs of LibreOffice processes whose command line contains `perfil`.
+
+    Returns None when the command line cannot be read (so the caller must NOT
+    delete anything it could not identify), and [] when it read them and none
+    matched. This is the safe path: it can only ever match our own runs, whose
+    command line carries `-env:UserInstallation=.../lo_profile`.
+    """
+    pids = []
+    mine = os.getpid()
+
+    if is_windows():
+        # tasklist gives no command line; CIM does. Without PowerShell we cannot
+        # tell ours from the user's, so we report "unknown" (None).
+        result = run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                      "Get-CimInstance Win32_Process -Filter \"Name='soffice.exe' or "
+                      "Name='soffice.bin'\" | ForEach-Object { $_.ProcessId.ToString() + "
+                      "' ' + $_.CommandLine }"], timeout=30)
+        if result.exit_code != 0:
+            return None
+        for line in result.output:
+            pid, cmd = _parte_pid_y_resto(line)
+            if pid is not None and pid != mine and perfil in cmd and pid not in pids:
+                pids.append(pid)
+        return pids
+
+    # pgrep -a: the full command line, which is where the profile lives.
+    result = run(["pgrep", "-af", "soffice"], timeout=30)
+    if result.exit_code not in (0, 1):     # 1 = no match, still a working pgrep
+        return None
+    for line in result.output:
+        pid, cmd = _parte_pid_y_resto(line)
+        if pid is not None and pid != mine and perfil in cmd and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def _parte_pid_y_resto(line):
+    """Split a `pgrep -a` / CIM line into (pid, rest-of-line)."""
+    line = line.strip()
+    partes = line.split(" ", 1)
+    if len(partes) != 2 or not partes[0].isdigit():
+        return None, ""
+    return int(partes[0]), partes[1]
+
+
+def soffice_pids(perfil=None):
     """PIDs of the LibreOffice processes currently running.
 
-    Best effort by nature: it shells out to tasklist or pgrep, and returns an
+    Without `perfil`, every one of them (used only by the explicit cleanup).
+    With `perfil`, only the processes whose command line contains that fragment,
+    i.e. the skill's own runs under the isolated profile; see `_pids_con_perfil`
+    for why that can return None.
+
+    Best effort by nature: it shells out to tasklist/pgrep/CIM, and returns an
     empty list when neither is usable rather than making an export fail over a
     diagnostic that is only a nicety.
     """
+    if perfil:
+        return _pids_con_perfil(perfil)
+
     pids = []
     mine = os.getpid()
 
@@ -302,10 +395,18 @@ def soffice_pids():
     return pids
 
 
-def kill_soffice_processes():
-    """Kill every leftover LibreOffice process. Returns how many it killed."""
+def kill_soffice_processes(perfil=None):
+    """Kill leftover LibreOffice processes. Returns how many it killed.
+
+    With `perfil` it only touches the skill's own runs (the safe default for
+    `export`); without it, every LibreOffice process (the explicit
+    `--cerrar-libreoffice` cleanup). It never kills what it could not identify.
+    """
+    pids = soffice_pids(perfil)
+    if not pids:
+        return 0
     killed = 0
-    for pid in soffice_pids():
+    for pid in pids:
         try:
             kill_process_tree(pid)
             killed += 1
@@ -349,11 +450,19 @@ def soffice_candidates():
     else:
         out.append("/usr/bin/soffice")
         out.append("/usr/lib/libreoffice/program/soffice")
-        # Distributions that ship LibreOffice through Snap or Flatpak keep the
-        # launcher out of the usual places, so a successful install can still
-        # look like a missing tool without these.
-        out.append("/snap/bin/libreoffice.current/usr/bin/soffice")
-        out.append("/var/lib/flatpak/exports/bin/soffice")
+        # Snap and Flatpak keep the launcher out of the usual places, so a
+        # successful install could still look like a missing tool. The names
+        # below are the ones those packages document: snap exports
+        # /snap/bin/libreoffice, and flatpak exports a wrapper named after the
+        # app id (org.libreoffice.LibreOffice). BEST EFFORT: neither was
+        # verified on a real snap/flatpak install, but a candidate that does
+        # not exist is skipped harmlessly by soffice_path().
+        out.append("/snap/bin/libreoffice")
+        out.append("/var/lib/flatpak/exports/bin/org.libreoffice.LibreOffice")
+        home = os.environ.get("HOME")
+        if home:
+            out.append(str(Path(home) / ".local" / "share" / "flatpak"
+                           / "exports" / "bin" / "org.libreoffice.LibreOffice"))
 
     return out
 
@@ -421,8 +530,8 @@ def run_soffice(arguments=(), timeout=300, log_dir=None):
     binary = soffice_console()
     if not binary:
         raise SofficeNotFound(
-            "LibreOffice not found. Set APA7_SOFFICE or run: python scripts/apa7.py install"
-        )
+            "LibreOffice not found. Set APA7_SOFFICE or run: %s"
+            % comando_apa7("install"))
 
     own_dir = log_dir is None
     if own_dir:

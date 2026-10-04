@@ -99,9 +99,11 @@ class TestSofficeCandidates(PlatformMixin, unittest.TestCase):
                 mock.patch.object(rutas.shutil, "which", return_value=None):
             found = rutas.soffice_candidates()
         self.assertIn("/usr/bin/soffice", found)
-        self.assertIn("/snap/bin/libreoffice.current/usr/bin/soffice", found)
-        self.assertIn("/var/lib/flatpak/exports/bin/soffice", found)
+        # Snap and Flatpak: the documented launcher names, not guessed paths.
+        self.assertIn("/snap/bin/libreoffice", found)
+        self.assertIn("/var/lib/flatpak/exports/bin/org.libreoffice.LibreOffice", found)
         self.assertFalse([p for p in found if "Program Files" in p])
+        self.assertFalse([p for p in found if "soffice.current" in p])
 
     def test_environment_override_comes_first(self):
         with env(APA7_SOFFICE="/custom/soffice"):
@@ -285,10 +287,52 @@ class TestLeftoverProcesses(PlatformMixin, unittest.TestCase):
                                   return_value=rutas.NativeResult(["pgrep: not found"], "", 127)):
             self.assertEqual(rutas.soffice_pids(), [])
 
+    def test_posix_profile_filter_keeps_only_our_own_runs(self):
+        lineas = [
+            "111 /usr/bin/soffice -env:UserInstallation=file:///tmp/lo_profile",
+            "222 /usr/lib/libreoffice/program/soffice.bin --norestore",
+        ]
+        with self.as_linux(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult(lineas, lineas[0], 0)):
+            self.assertEqual(rutas.soffice_pids("lo_profile"), [111])
+
+    def test_posix_profile_filter_with_no_match_is_empty(self):
+        with self.as_linux(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult([], "", 1)):
+            self.assertEqual(rutas.soffice_pids("lo_profile"), [])
+
+    def test_windows_profile_filter_keeps_only_our_own_runs(self):
+        lineas = [
+            "4321 C:\\Program Files\\LibreOffice\\program\\soffice.exe "
+            "-env:UserInstallation=file:///C:/tmp/lo_profile",
+            "999 C:\\Program Files\\LibreOffice\\program\\soffice.bin --norestore",
+        ]
+        with self.as_windows(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult(lineas, lineas[0], 0)):
+            self.assertEqual(rutas.soffice_pids("lo_profile"), [4321])
+
+    def test_windows_profile_filter_without_cim_is_unknown(self):
+        # No command line means we cannot tell ours from the user's, so the
+        # caller must be told "unknown" (None) instead of being handed a list.
+        with self.as_windows(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=rutas.NativeResult([], "", 1)):
+            self.assertIsNone(rutas.soffice_pids("lo_profile"))
+
+    def test_kill_does_nothing_when_the_pid_list_is_unknown(self):
+        with mock.patch.object(rutas, "soffice_pids", return_value=None), \
+                mock.patch.object(rutas, "kill_process_tree") as killer:
+            self.assertEqual(rutas.kill_soffice_processes("lo_profile"), 0)
+        killer.assert_not_called()
+
     def test_kill_reports_how_many_it_killed(self):
-        with mock.patch.object(rutas, "soffice_pids", return_value=[1, 2, 3]), \
+        with mock.patch.object(rutas, "soffice_pids", return_value=[1, 2, 3]) as pids, \
                 mock.patch.object(rutas, "kill_process_tree") as killer:
             self.assertEqual(rutas.kill_soffice_processes(), 3)
+        pids.assert_called_once_with(None)      # no filter = every LibreOffice
         self.assertEqual(killer.call_count, 3)
 
     def test_one_failure_does_not_stop_the_others(self):
@@ -366,6 +410,22 @@ class TestSkillRoot(unittest.TestCase):
             self.assertIn("APA7_SKILL_ROOT", stderr.write.call_args[0][0])
 
 
+class TestComandoApa7(unittest.TestCase):
+    """T10: the suggested command must run on THIS machine."""
+
+    def test_it_uses_the_running_interpreter_and_the_real_script(self):
+        cmd = rutas.comando_apa7("install", "--only", "node")
+        self.assertIn(sys.executable, cmd)
+        self.assertIn("apa7.py", cmd)
+        self.assertIn("--only", cmd)
+        self.assertIn("node", cmd)
+
+    def test_it_never_suggests_a_bare_python(self):
+        # "python scripts/apa7.py" is exactly what this must stop doing.
+        cmd = rutas.comando_apa7("check")
+        self.assertNotIn(" python scripts/apa7.py", cmd)
+
+
 class TestWorkdir(unittest.TestCase):
     def setUp(self):
         rutas._SKILL_ROOT = None
@@ -378,6 +438,20 @@ class TestWorkdir(unittest.TestCase):
                 found = rutas.workdir()
             self.assertEqual(found, target)
             self.assertTrue(target.is_dir())
+
+    def test_a_dry_run_does_not_create_it(self):
+        # T8: `install --dry-run` promised to create nothing, but workdir()
+        # was reached (and mkdir'd) before the confirmation gate.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "work"
+            with env(APA7_WORKDIR=str(target)):
+                rutas.set_dry_run(True)
+                try:
+                    found = rutas.workdir()
+                finally:
+                    rutas.set_dry_run(False)
+            self.assertEqual(found, target)
+            self.assertFalse(target.exists())
 
     def test_node_dir_defaults_to_the_workdir_and_honours_its_override(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,11 +1,12 @@
 """fuentes.py - which embedded font names are acceptable in the PDF.
 
-Times New Roman ships with MS Office, not with the operating system. On a Linux
-or macOS machine that does not have it, LibreOffice silently substitutes a
-metrically compatible font: identical advance widths, so line breaks, page
-breaks and the line advance are all unaffected. The old check only accepted
-names containing "timesnewroman", so every correct document produced outside
-Windows was reported as using a font it was not allowed to use.
+When the requested font is not available, LibreOffice silently substitutes a
+metrically compatible one. That is what happened on the Linux and macOS
+machines this was checked on: the substitute shares advance widths with Times
+New Roman, so line breaks, page breaks and the line advance are unaffected, but
+the embedded font name is different. The old check only accepted names
+containing "timesnewroman", so every correct document whose machine lacked the
+real font was reported as using a font it was not allowed to use.
 
 A separate module because verificar-pdf.py can only be imported where pymupdf
 exists, and this rule needs no PDF and no third-party package to be tested.
@@ -15,6 +16,13 @@ import re
 
 # Normalised (lowercase, letters only) names accepted as Times New Roman.
 #
+# These are the families listed as metric-compatible with Times (or Times New
+# Roman) in the usual substitution tables: Liberation Serif (Red Hat), Nimbus
+# Roman (URW), TeX Gyre Termes (GUST), FreeSerif (GNU) and Tinos (Google's
+# Croscore serif, metric-compatible with Times New Roman; its sans partner
+# Arimo is the Arial-compatible one). They share advance widths with Times, so
+# line and page breaks are unaffected.
+#
 # Matched as PREFIXES, because the embedded name carries the style:
 # "LiberationSerif-Bold" normalises to "liberationserifbold".
 METRICOS = (
@@ -23,8 +31,7 @@ METRICOS = (
     "nimbusroman",      # URW clone, ships with Ghostscript
     "texgyretermes",
     "freeserif",
-    "tinos",            # the metric-compatible Arial clone, as used for Roman
-    "arialmt",          # only reached if the fontconfig alias maps it to Times
+    "tinos",            # Croscore serif, metric-compatible with Times New Roman
 )
 
 # Fonts that are known and deliberately NOT accepted. They are a different

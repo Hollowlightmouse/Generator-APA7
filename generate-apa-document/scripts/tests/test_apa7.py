@@ -11,6 +11,7 @@ import argparse
 import ast
 import contextlib
 import io
+import json
 import shutil
 import sys
 import tempfile
@@ -189,7 +190,7 @@ class TestMissingTools(CheckHarness):
 
     def test_the_failure_tells_the_agent_what_to_do_next(self):
         _, out, _ = self.run_check(_Env(node_path=None))
-        self.assertIn("python scripts/apa7.py install", out)
+        self.assertIn(rutas.comando_apa7("install"), out)
 
 
 class TestPythonDiagnostics(CheckHarness):
@@ -203,7 +204,7 @@ class TestPythonDiagnostics(CheckHarness):
     def test_a_broken_venv_is_told_to_be_recreated_not_reinstalled(self):
         _, out, _ = self.run_check(_Env(python_path=None, venv_python="/skill/.venv/bin/python3"))
         self.assertIn("exists but does not run", out)
-        self.assertIn("Recreate it with: python scripts/apa7.py install", out)
+        self.assertIn("Recreate it with: " + rutas.comando_apa7("install"), out)
 
     def test_a_too_old_interpreter_is_reported_with_the_floor(self):
         old = lambda *a, **k: _Line("3.8.10 TOO-OLD", exit_code=3)
@@ -231,7 +232,7 @@ class TestDocxResolution(CheckHarness):
         with tempfile_workdir() as empty:
             _, out, _ = self.run_check(_Env(node_dir=empty))
         self.assertIn("not installed in", out)
-        self.assertIn("python scripts/apa7.py install", out)
+        self.assertIn(rutas.comando_apa7("install"), out)
 
 
 class TestLibreOffice(CheckHarness):
@@ -358,7 +359,7 @@ class TestExport(CheckHarness):
         _, _, err = self._export(self._ok_result(stderr=noise))
         self.assertIn("Error: source file could not be loaded", err)
 
-    def test_leftover_processes_are_cleaned_before_and_after(self):
+    def test_our_own_leftovers_are_cleaned_before_and_after(self):
         calls = []
         profile = self.dir / "lo_profile"
         profile.mkdir(parents=True, exist_ok=True)
@@ -370,15 +371,64 @@ class TestExport(CheckHarness):
             calls.append("convert")
             return self._ok_result()
 
+        def fake_clean(perfil=None):
+            calls.append(("clean", perfil))
+            return 0
+
         with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
-                mock.patch.object(rutas, "kill_soffice_processes",
-                                  side_effect=lambda: calls.append("clean") or 0), \
+                mock.patch.object(rutas, "kill_soffice_processes", side_effect=fake_clean), \
                 mock.patch.object(rutas, "run_soffice", fake_run_soffice):
             with contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):
                 apa7.cmd_export(self._args())
-        # clean -> convert -> clean
-        self.assertEqual(calls, ["clean", "convert", "clean"])
+        # Only our isolated profile is cleaned, before and after.
+        self.assertEqual(calls, [("clean", "lo_profile"), "convert",
+                                 ("clean", "lo_profile")])
+
+    def test_the_users_libreoffice_is_not_touched_by_default(self):
+        perfiles = []
+        expected = self.dir / "out" / "doc.pdf"
+
+        def fake_run_soffice(arguments, timeout=300, log_dir=None):
+            expected.parent.mkdir(parents=True, exist_ok=True)
+            expected.write_bytes(b"%PDF")
+            return self._ok_result()
+
+        def fake_clean(perfil=None):
+            perfiles.append(perfil)
+            return 0
+
+        with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
+                mock.patch.object(rutas, "kill_soffice_processes", side_effect=fake_clean), \
+                mock.patch.object(rutas, "run_soffice", fake_run_soffice):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                apa7.cmd_export(self._args())
+        self.assertEqual(perfiles, ["lo_profile", "lo_profile"])
+        self.assertNotIn(None, perfiles)
+
+    def test_cerrar_libreoffice_closes_every_process_first(self):
+        perfiles = []
+        expected = self.dir / "out" / "doc.pdf"
+
+        def fake_run_soffice(arguments, timeout=300, log_dir=None):
+            expected.parent.mkdir(parents=True, exist_ok=True)
+            expected.write_bytes(b"%PDF")
+            return self._ok_result()
+
+        def fake_clean(perfil=None):
+            perfiles.append(perfil)
+            return 2
+
+        with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
+                mock.patch.object(rutas, "kill_soffice_processes", side_effect=fake_clean), \
+                mock.patch.object(rutas, "run_soffice", fake_run_soffice):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = apa7.cmd_export(self._args(cerrar_libreoffice=True))
+        self.assertEqual(code, 0)
+        self.assertEqual(perfiles, [None, "lo_profile"])
+        self.assertIn("unsaved", err.getvalue())
 
     def test_a_missing_libreoffice_fails_before_running_anything(self):
         out, err = io.StringIO(), io.StringIO()
@@ -521,7 +571,10 @@ class TestForwarding(CheckHarness):
             code, calls, out, err = self.call([command])
             self.assertEqual(code, 2, command)
             self.assertEqual(calls, [], command)
-            self.assertIn("Usage: python scripts/apa7.py " + command, err)
+            self.assertIn("Usage: ", err)
+            self.assertIn("apa7.py", err)
+            self.assertIn(command, err)
+            self.assertNotIn("python scripts/apa7.py", err)
 
     def test_a_missing_target_script_is_reported_not_raised(self):
         code, calls, out, err = self.call(["parse", "--md", "a.md"],
@@ -560,10 +613,96 @@ class TestNoHardcodedPaths(CheckHarness):
                 imported.add((node.module or "").split(".")[0])
         imported.discard("")
         self.assertTrue(imported)
-        allowed = {"argparse", "json", "os", "sys", "time", "datetime", "pathlib",
-           "subprocess", "lib"}
+        allowed = {"argparse", "contextlib", "io", "json", "os", "sys", "time",
+           "datetime", "pathlib", "subprocess", "lib"}
         self.assertEqual(imported - allowed, set(),
                          "third-party import in apa7.py: %s" % (imported - allowed))
+
+
+class TestDoblePasadaDeIndices(unittest.TestCase):
+    """The two-pass index build: the second run must carry --paginas-json."""
+
+    def test_valor_de_lee_las_dos_formas_del_flag(self):
+        self.assertEqual(apa7._valor_de(["--out", "a.docx"], "--out"), "a.docx")
+        self.assertEqual(apa7._valor_de(["--out=a.docx"], "--out"), "a.docx")
+        self.assertIsNone(apa7._valor_de(["--otro", "x"], "--out"))
+
+    def test_manifiesto_con_toc_respeta_toc_campos_false(self):
+        tmp = Path(tempfile.mkdtemp(prefix="apa7_toc_"))
+        ruta = tmp / "m.json"
+        ruta.write_text(json.dumps({"opciones": {"toc_campos": False}}), encoding="utf-8")
+        self.assertIsNone(apa7._manifiesto_con_toc(["--manifiesto", str(ruta)]))
+        ruta.write_text(json.dumps({"opciones": {}}), encoding="utf-8")
+        self.assertIsNotNone(apa7._manifiesto_con_toc(["--manifiesto", str(ruta)]))
+        self.assertIsNone(apa7._manifiesto_con_toc(["--manifiesto", str(tmp / "nope.json")]))
+
+    def test_sin_out_no_hay_segunda_pasada(self):
+        llamadas = []
+        with mock.patch.object(apa7.subprocess, "call",
+                               side_effect=lambda c: llamadas.append(c) or 0):
+            codigo = apa7._segunda_pasada_indices("/usr/bin/node", "build.js",
+                                                  ["--manifiesto", "m.json"])
+        self.assertEqual(codigo, 0)
+        self.assertEqual(llamadas, [])
+
+    def test_la_segunda_pasada_rebuilds_con_paginas_json(self):
+        tmp = Path(tempfile.mkdtemp(prefix="apa7_doble_"))
+        docx = tmp / "salida.docx"
+        docx.write_text("x", encoding="utf-8")
+        manifest = tmp / "m.json"
+        manifest.write_text("{}", encoding="utf-8")
+        (tmp / "paginas-de-pdf.py").write_text("", encoding="utf-8")
+        rest = ["--manifiesto", str(manifest), "--out", str(docx)]
+        llamadas = []
+
+        def fake_call(comando):
+            partes = [str(c) for c in comando]
+            llamadas.append(partes)
+            # The first call is paginas-de-pdf.py: emulate the JSON it writes.
+            destino = Path(partes[partes.index("--out") + 1])
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            destino.write_text('{"secciones":{},"tablas":{},"figuras":{}}', encoding="utf-8")
+            return 0
+
+        def fake_export(ns):
+            (Path(ns.outdir) / (Path(ns.docx).stem + ".pdf")).write_bytes(b"%PDF-1.4")
+            return 0
+
+        with mock.patch.object(apa7, "cmd_export", fake_export), \
+             mock.patch.object(rutas, "venv_python", return_value="C:/py"), \
+             mock.patch.object(rutas, "python_works", return_value=True), \
+             mock.patch.object(rutas, "skill_script", side_effect=lambda n: str(tmp / n)), \
+             mock.patch.object(apa7.subprocess, "call", fake_call):
+            codigo = apa7._segunda_pasada_indices("/usr/bin/node",
+                                                  str(tmp / "build-docx.js"), rest)
+
+        self.assertEqual(codigo, 0)
+        self.assertEqual(len(llamadas), 2)          # measure + rebuild
+        self.assertTrue(llamadas[0][1].endswith("paginas-de-pdf.py"))
+        self.assertTrue(llamadas[1][1].endswith("build-docx.js"))
+        self.assertIn("--paginas-json", llamadas[1])
+
+
+class TestCompatibleWithPython39(unittest.TestCase):
+    """The scripts must PARSE under Python 3.9.
+
+    ast.parse(feature_version=(3, 9)) rejects grammar that 3.9 did not have
+    (the match statement, for instance). It is not a full compatibility check:
+    `int | None` in an annotation parses fine under 3.9 and only fails when
+    evaluated, and no standard-library API is inspected. So this proves syntax
+    only, not that every API used exists in 3.9.
+    """
+
+    def test_every_python_file_parses_as_python_39(self):
+        scripts = Path(__file__).resolve().parents[1]
+        files = sorted(scripts.rglob("*.py"))
+        self.assertTrue(files, "no .py files found under %s" % scripts)
+        for path in files:
+            try:
+                ast.parse(path.read_text(encoding="utf-8"),
+                          filename=str(path), feature_version=(3, 9))
+            except SyntaxError as exc:
+                self.fail("not valid Python 3.9 syntax: %s (%s)" % (path, exc))
 
 
 if __name__ == "__main__":

@@ -54,9 +54,9 @@ if (!fs.existsSync(RUTA_DOCX)) {
 const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, ImageRun,
   Bookmark, SimpleField, PageBreak, Footer, Header, PageNumber, AlignmentType,
-  TabStopType, LeaderType, BorderStyle, WidthType, ShadingType, VerticalAlign,
+  BorderStyle, WidthType, ShadingType, VerticalAlign,
   SectionType, PageOrientation, TableLayoutType, HeightRule, convertInchesToTwip,
-  Tab,
+  LineRuleType, TableOfContents,
 } = require(RUTA_DOCX);
 
 // ---------------------------------------------------------------------------
@@ -93,6 +93,20 @@ function log(msg) {
 // and saves it from a Windows editor, it comes back with a BOM.
 const M = JSON.parse(fs.readFileSync(args.manifiesto, "utf8").replace(/^\uFEFF/, ""));
 const DOCX = args.out;
+
+// Real pages of the entries, measured from a first export in apa7.py's double
+// pass (--paginas-json). A TOC field's result is computed by the PDF engine, not
+// by this script, so the only way for the .docx to already carry correct numbers
+// is to cache what the first pass measured. Without this file the entries render
+// without page numbers and Word fills them in when the document is opened.
+const PAGINAS = (args["paginas-json"] && fs.existsSync(args["paginas-json"]))
+  ? JSON.parse(fs.readFileSync(args["paginas-json"], "utf8").replace(/^\uFEFF/, ""))
+  : { secciones: {}, tablas: {}, figuras: {} };
+
+function paginaDe(grupo, clave) {
+  const valor = (PAGINAS[grupo] || {})[String(clave)];
+  return (valor === undefined || valor === null || valor === "") ? undefined : valor;
+}
 
 // --- Critical manifest validation (abort, do not guess) ---------------------
 // Back in the day the document was delivered with blank table and figure
@@ -288,7 +302,8 @@ function construirPortada() {
       type: tipo,
       data: fs.readFileSync(p.logo),
       transformation: { width: 160, height: 160 },
-    })], { line: 240, before: 0, after: 0 }));   // single: an image has no line spacing
+        })], { line: 240, before: 0, after: 0, lineRule: LineRuleType.AUTO }));
+   // single: an image has no line spacing
     if (p.logo_leyenda) zonaAlta.push(lineaPortada(centro(p.logo_leyenda)));
   }
   // With no logo NOTHING is inserted: neither a placeholder, nor a frame, nor the
@@ -359,19 +374,67 @@ function construirPortada() {
 }
 
 // ---------------------------------------------------------------------------
-// Table of contents with PAGEREF fields
+// Table of contents, list of tables and list of figures (real Word fields)
 // ---------------------------------------------------------------------------
+//
+// These are REAL TOC fields. A hand-written PAGEREF list is not a TOC: Word
+// cannot update it and it does not survive editing. A TOC field, on the other
+// hand, is only computed by the rendering engine (LibreOffice on export, Word on
+// open), so a single pass cannot know the page numbers. apa7.py therefore runs
+// two passes: it exports, measures the real pages, and rebuilds with
+// --paginas-json, whose numbers become the field's cached result. If the file is
+// absent the entries still print, just without numbers, and Word fills them in
+// when the document is opened (features.updateFields).
+//
+// The field switch that selects entries differs per index:
+//   content  -> \u  (paragraphs with an applied outline level)
+//   tables   -> \c "Tabla"   (captions with a SEQ Tabla field)
+//   figures  -> \c "Figura"  (captions with a SEQ Figura field)
+// That is why the headings carry `outlineLevel` and the captions a real SEQ.
 
-function lineaTOC(texto, bookmark, nivel = 1) {
-  return new Paragraph({
-    spacing: { line: DOBLE, before: 0, after: 0 },
-    indent: { left: (nivel - 1) * SANGRIA_1RA },
-    tabStops: [{ type: TabStopType.RIGHT, position: ANCHO_CONTENIDO, leader: LeaderType.DOT }],
-    children: [
-      new TextRun({ text: texto, font: FUENTE, size: TAM, bold: nivel === 1 }),
-      new TextRun({ children: [new Tab()], font: FUENTE, size: TAM }),
-      new SimpleField(`PAGEREF ${bookmark} \\h`),
-    ],
+// One cached entry per line: title, level (-> TOC1..TOC5 style), page, target.
+function entradasDeSecciones(opts) {
+  // Repeated titles are disambiguated ONLY if the manifest asks for it, so that
+  // the TOC is navigable without altering the document's text.
+  const vistos = new Map();
+  const salida = [];
+  for (const s of M.secciones) {
+    let texto = s.texto;
+    const n = (vistos.get(texto) || 0) + 1;
+    vistos.set(texto, n);
+    if (n > 1 && opts.dedupe_toc) {
+      texto = `${texto} (${s.hid})`;
+      log(`    TOC: repeated title -> "${texto}"`);
+    }
+    salida.push({
+      title: texto,
+      level: s.nivel,
+      page: paginaDe("secciones", s.hid),
+      href: `apa_sec_${s.hid}`,
+    });
+  }
+  return salida;
+}
+
+function entradasDeLista(grupo, etiqueta) {
+  // Only the figures that actually make it into the body. Listing the omitted
+  // ones too leaves an entry whose bookmark is never created.
+  return (M[grupo] || [])
+    .filter((o) => (grupo === "figuras" ? o.existe : true))
+    .map((o) => ({
+      title: `${etiqueta} ${o.indice}. ${o.titulo}`,
+      level: 1,
+      page: paginaDe(grupo, o.indice),
+      href: grupo === "tablas" ? `apa_tbl_${o.indice}` : `apa_fig_${o.indice}`,
+    }));
+}
+
+function crearTOC(alias, entradas, extra = {}) {
+  return new TableOfContents(alias, {
+    hyperlink: true,
+    beginDirty: true,
+    cachedEntries: entradas,
+    ...extra,
   });
 }
 
@@ -381,38 +444,23 @@ function construirIndices() {
 
   // --- Table of contents: ALWAYS --------------------------------------------
   hijos.push(parrafoCentrado([new TextRun({ text: "Tabla de contenido", bold: true, font: FUENTE, size: TAM })]));
-
-  // Repeated titles are disambiguated ONLY if the manifest asks for it, so that
-  // the TOC is navigable without altering the document's text.
-  const vistos = new Map();
-  for (const s of M.secciones) {
-    let texto = s.texto;
-    const n = (vistos.get(texto) || 0) + 1;
-    vistos.set(texto, n);
-    if (n > 1 && opts.dedupe_toc) {
-      texto = `${texto} (${s.hid})`;
-      log(`    TOC: repeated title -> "${texto}"`);
-    }
-    hijos.push(lineaTOC(texto, `apa_sec_${s.hid}`, s.nivel));
-  }
+  hijos.push(crearTOC("Contenido", entradasDeSecciones(opts), {
+    useAppliedParagraphOutlineLevel: true,
+  }));
 
   // --- List of tables: only if there ARE tables -----------------------------
   if (opts.indice_tablas && M.tablas && M.tablas.length) {
     hijos.push(new Paragraph({ children: [new PageBreak()] }));
     hijos.push(parrafoCentrado([new TextRun({ text: "Indice de tablas", bold: true, font: FUENTE, size: TAM })]));
-    for (const t of M.tablas) {
-          const et = `${t.titulo}`;
-      hijos.push(lineaTOC(`Tabla ${t.indice}. ${et}`, `apa_tbl_${t.indice}`, 1));
-    }
+    hijos.push(crearTOC("Tablas", entradasDeLista("tablas", "Tabla"), {
+      captionLabelIncludingNumbers: "Tabla",
+    }));
   } else if (M.tablas && M.tablas.length) {
     log("    List of tables OMITTED by explicit manifest decision.");
   }
 
   // --- List of figures: only if there ARE figures ---------------------------
   if (opts.indice_figuras && M.figuras && M.figuras.length) {
-    // Only the figures that actually make it into the body. Listing the omitted
-    // ones too leaves a line with "Error: no se encontro el origen de la
-    // referencia", because their bookmark is never created.
     const figsValidas = M.figuras.filter((f) => f.existe);
     const omitidas = M.figuras.length - figsValidas.length;
     if (omitidas > 0) {
@@ -421,10 +469,9 @@ function construirIndices() {
     if (figsValidas.length) {
       hijos.push(new Paragraph({ children: [new PageBreak()] }));
       hijos.push(parrafoCentrado([new TextRun({ text: "Indice de figuras", bold: true, font: FUENTE, size: TAM })]));
-      for (const f of figsValidas) {
-            const et = `${f.titulo}`;
-        hijos.push(lineaTOC(`Figura ${f.indice}. ${et}`, `apa_fig_${f.indice}`, 1));
-      }
+      hijos.push(crearTOC("Figuras", entradasDeLista("figuras", "Figura"), {
+        captionLabelIncludingNumbers: "Figura",
+      }));
     }
   } else if (M.figuras && M.figuras.length) {
     log("    List of figures OMITTED by explicit manifest decision.");
@@ -499,15 +546,21 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
   const anchos = repartirColumnas(ancho, ncols);
 
   // Number in bold above the table; title in italics below (APA 7).
-  // The bookmark goes on the number: that is what the list of tables points at
-  // with PAGEREF, and if it does not exist, the index comes out with "Error: no
-  // se encontro el origen de la referencia" on every line.
+  // The bookmark goes on the number: it is the hyperlink target of the cached
+  // list-of-tables entry (and of the field Word rebuilds on open), so without
+  // it the entry links to nothing.
   hijos.push(new Paragraph({
     spacing: { line: DOBLE, before: 0, after: 0 },
     keepNext: true,
     children: [new Bookmark({
       id: `apa_tbl_${t.indice}`,
-      children: [new TextRun({ text: `Tabla ${t.indice}`, bold: true, font: FUENTE, size: TAM })],
+      children: [
+        new TextRun({ text: "Tabla ", bold: true, font: FUENTE, size: TAM }),
+        // A real SEQ field, not the literal number: "TOC \c \"Tabla\"" only
+        // collects captions that carry "SEQ Tabla". The cached value keeps the
+        // number visible even before Word recalculates the field.
+        new SimpleField(" SEQ Tabla \\* ARABIC ", String(t.indice)),
+      ],
     })],
   }));
   if (t.titulo) {
@@ -593,7 +646,10 @@ function construirFigura(f) {
     keepNext: true,
     children: [new Bookmark({
       id: `apa_fig_${f.indice}`,
-      children: [new TextRun({ text: `Figura ${f.indice}`, bold: true, font: FUENTE, size: TAM })],
+      children: [
+        new TextRun({ text: "Figura ", bold: true, font: FUENTE, size: TAM }),
+        new SimpleField(" SEQ Figura \\* ARABIC ", String(f.indice)),
+      ],
     })],
   }));
   if (f.titulo) {
@@ -683,7 +739,7 @@ function dimensionesImagen(ruta) {
   // page. That is exactly the case that produces an inconsistent document.
   if (f.nota) {
     hijos.push(new Paragraph({
-      spacing: { line: 240, before: 0, after: 0 },
+      spacing: { line: 240, before: 0, after: 0, lineRule: LineRuleType.AUTO },
       keepNext: true,
       children: [
         new TextRun({ text: "Nota. ", italics: true, font: FUENTE, size: TAM }),
@@ -694,7 +750,7 @@ function dimensionesImagen(ruta) {
 
   hijos.push(new Paragraph({
     alignment: AlignmentType.CENTER,
-    spacing: { line: 240, before: 0, after: 0 },
+    spacing: { line: 240, before: 0, after: 0, lineRule: LineRuleType.AUTO },
     children: [new ImageRun({
       type: tipo,
       data: fs.readFileSync(f.ruta_absoluta),
@@ -787,6 +843,10 @@ function construirCuerpoSegmentado(hayContenidoPrevio) {
           keepNext: !nivelEnLinea,
           pageBreakBefore: nivel1 && actual.ocupado,
           indent: nivelEnLinea ? { firstLine: SANGRIA_1RA } : undefined,
+          // The applied outline level is what the content TOC's "\u" collects
+          // and what LibreOffice turns into PDF bookmarks (doc.get_toc()), which
+          // is how the double pass learns each section's real page.
+          outlineLevel: nivel - 1,
           children: hijosCab,
         });
         emitir(p);
@@ -1004,9 +1064,10 @@ async function main() {
 
   const doc = new Document({
     creator: "generate-apa-document",
-    // Tells the consumer to recalculate every field when the file is opened.
-    // Without it the PAGEREF fields of the indexes ship unresolved: the .docx
-    // shows blanks or a 0 and only LibreOffice fixes them while exporting.
+    // Asks the consumer (Word) to recalculate every field when the file is
+    // opened. The indexes ship with a cached result (the pages measured in the
+    // second pass), so this is a convenience for Word users, not what makes the
+    // PDF correct: LibreOffice exports the cached result as-is.
     features: { updateFields: true },
     title: p.titulo || "Documento APA 7",
     description: `Generado desde ${M.fuente ? M.fuente.md : "fuente .md"}`,
@@ -1014,6 +1075,28 @@ async function main() {
       default: {
         document: { run: { font: FUENTE, size: TAM }, paragraph: { spacing: { line: DOBLE, before: 0, after: 0 } } },
       },
+      // The cached TOC entries are emitted with the built-in TOC1..TOC5 styles.
+      // Defining them here keeps the indexes in APA type (Times 12, double
+      // spaced, level-1 entries bold) instead of whatever the renderer falls
+      // back to when the style is missing.
+      paragraphStyles: Array.from({ length: 5 }, (_, i) => ({
+        id: `TOC${i + 1}`,
+        name: `TOC ${i + 1}`,
+        quickFormat: true,
+        run: { font: FUENTE, size: TAM, bold: i === 0 },
+        paragraph: {
+          spacing: { line: DOBLE, before: 0, after: 0 },
+          indent: { left: i * SANGRIA_1RA },
+        },
+      })),
+      // TOC entries are hyperlinks to the headings. The default hyperlink style
+      // is blue and underlined, which APA does not use, so the index keeps black
+      // text and no underline.
+      characterStyles: [{
+        id: "IndexLink",
+        name: "Index Link",
+        run: { font: FUENTE, size: TAM, color: "000000" },
+      }],
     },
     sections: secciones,
   });
@@ -1025,8 +1108,14 @@ async function main() {
 
   log("");
   log(`.docx written: ${DOCX} (${buffer.length} bytes)`);
-  log("PAGEREF fields inserted. LibreOffice resolves them on export;");
-  log("to also fix them in the .docx the opt-in macro is required.");
+  if (Object.keys(PAGINAS.secciones || {}).length || Object.keys(PAGINAS.tablas || {}).length
+      || Object.keys(PAGINAS.figuras || {}).length) {
+    log("Indexes built as real TOC fields with cached page numbers (--paginas-json).");
+    log("Word recalculates them on open; LibreOffice/Word can update them in place.");
+  } else {
+    log("Indexes built as real TOC fields; page numbers are left for the renderer.");
+    log("apa7.py resolves them by exporting once and rebuilding with --paginas-json.");
+  }
 
   if (args.log) {
     const ld = path.dirname(path.resolve(args.log));

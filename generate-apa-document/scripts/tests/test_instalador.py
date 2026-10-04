@@ -58,6 +58,15 @@ class TestPlans(unittest.TestCase):
 
 
 class TestElevation(unittest.TestCase):
+    def setUp(self):
+        # The suite has to behave the same when it is run as root and when it
+        # is not, so each test states the privilege it assumes instead of
+        # inheriting it from whatever account happens to run the tests. These
+        # two tests used to fail when uid was 0.
+        patcher = mock.patch.object(instalador, "is_root", return_value=False)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def test_apt_is_elevated_with_a_non_interactive_sudo(self):
         argv = instalador.build(manager("apt"), "node")
         # -n matters more than sudo: without it sudo PROMPTS and an agent hangs.
@@ -246,6 +255,13 @@ class TestDryRun(InstallHarness):
     def test_dry_run_creates_no_virtual_environment(self):
         self.run_install(dry_run=True)
         self.assertFalse((self.tmp / ".venv").exists())
+
+    def test_dry_run_writes_no_npm_anchor(self):
+        # T8: node_dir/package.json used to be written before _confirm, so a
+        # dry run left an empty node dir and an anchor behind.
+        self.run_install(dry_run=True)
+        self.assertFalse((self.tmp / "node").exists())
+        self.assertFalse((self.tmp / "node" / "package.json").exists())
 
     def test_dry_run_prints_every_installing_step(self):
         # python=False so the Python step is part of the plan; a machine that

@@ -102,6 +102,10 @@ something is missing. It always runs before transforming a document. It prints
 one line per tool (`OK|<tool>|<detail>`, `INFO|<tool>|<detail>` or
 `MISSING|<tool>|<detail>`) and ends with `RESULT: OK` or `RESULT: MISSING`.
 
+The examples use `python`; use whichever interpreter exists (`python3` on macOS
+and most Linux distributions, `py` on Windows). `apa7.py`'s own messages always
+print the exact command with the interpreter it is running.
+
 ```bash
 python scripts/apa7.py check
 ```

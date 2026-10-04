@@ -5,7 +5,7 @@ description: Builds or structures an academic Word (.docx) and PDF document foll
 
 # Generate an APA 7 academic document (Word + PDF)
 
-Turns a source `.md` (plus its images and layout JSON) into a `.docx` with an institutional cover page, a table of contents / list of tables / list of figures generated with the `docx` library (entries with page numbers via `PAGEREF` fields) and APA 7 references — and exports that same document to PDF with **headless LibreOffice**, the only conversion engine. Both files are delivered.
+Turns a source `.md` (plus its images and layout JSON) into a `.docx` with an institutional cover page, a table of contents / list of tables / list of figures generated with the `docx` library as **real `TOC` fields** (their page numbers are measured in a **double pass**: the first `.docx` is exported to a throwaway PDF with LibreOffice, `scripts/paginas-de-pdf.py` reads the real page of every entry, and the second build ships those numbers as the cached field result) and APA 7 references — and exports that same document to PDF with **headless LibreOffice**, the only conversion engine. Both files are delivered.
 
 **Mandatory engine: LibreOffice. Microsoft Word is NOT a requirement.**
 
@@ -20,6 +20,13 @@ python scripts/apa7.py <command> [options]
 
 `apa7.py` is the only entry point. It runs on Python 3.9 or later, uses the
 standard library only, and needs no shell-specific syntax.
+
+**The interpreter name is not fixed.** `python` above stands for whichever
+command exists on this machine: `python3` on macOS and most Linux
+distributions, `python` where it is present, `py` on Windows. When in doubt,
+check the version (`python3 --version`, `python --version` or `py --version`)
+and use the one that reports **3.9 or later**; every message `apa7.py` prints
+already shows the exact command with the interpreter that is running.
 
 ## When it activates
 
@@ -172,7 +179,8 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 5. **Build the `.docx`** with `python scripts/apa7.py build --manifiesto "MANIFEST.json" --out "document.docx"` (it runs `scripts/build-docx.js` with the resolved Node, the `docx` library from `.work` and the layout JSON from the manifest). Formatting rules are in `references/apa7-format.md`; instructions for functional indices are in `references/word-toc-fields.md`. Critical points already resolved:
    - The TOC is generated **always**; the list of tables and the list of figures **only if the document has them**. If it does not, **ask** to confirm and do **not** generate the empty list.
    - Tables with `width` + `columnWidths` + `layout: FIXED`: LibreOffice does not render tables without defined column widths.
-   - Captions with a **literal number** ("Tabla 1"), not a `SEQ` field (LibreOffice does not resolve `SEQ`).
+   - Captions with a **real `SEQ` field** (`SEQ Tabla` / `SEQ Figura`), which LibreOffice **does** resolve, because `TOC \c "Tabla"` only collects captions that carry that SEQ. Headings carry an applied `outlineLevel` for `TOC \u`.
+   - **Two-pass build.** `build` runs node once, then (if the manifest asks for TOC fields and LibreOffice is available) exports to a throwaway PDF, measures it with `paginas-de-pdf.py`, and runs node a second time with `--paginas-json`. Both passes are inside the one `build` command. If the venv or LibreOffice is missing, the first `.docx` is kept and Word fills the numbers in on open (<code>updateFields</code>) — a degradation, not a failure. Needs LibreOffice (already mandatory in STEP 0).
    - **Aborts with code 4 if a title or caption is missing.** There is no `(sin título)`: it is a defect, not a text.
    - **Figure note BEFORE the image** and with `keepNext`, so the note is not orphaned on the previous page. **Table note AFTER the table**.
    - **Tables with HORIZONTAL borders only**: top border, a line under the header row and bottom border. No verticals and no lines between data rows.
@@ -185,7 +193,7 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
    python scripts/apa7.py export --docx "<path>/document.docx" [--outdir "<folder>/deliverable"]
    ```
 
-   It prints **only** the resulting PDF path on stdout and puts the log in `<outdir>/_logs/03-export.log`, so the path can be captured directly. Progress and warnings go to stderr. It works on a temporary copy with an **isolated LibreOffice profile** per run, which is deleted at the end, and it closes any LibreOffice left running so the next run is not blocked by a stale lock. The `Could not find platform independent libraries <prefix>` warning on stderr is benign. Do **not** launch `soffice` through a shell background operator or `Start-Process`: the child inherits the pipe handle and the reader hangs (see `references/word-toc-fields.md`).
+   It prints **only** the resulting PDF path on stdout and puts the log in `<outdir>/_logs/03-export.log`, so the path can be captured directly. Progress and warnings go to stderr. It works on a temporary copy with an **isolated LibreOffice profile** per run, which is deleted at the end; because of that isolation a LibreOffice the user has open is **not** a problem and is left alone. Only the skill's **own** leftovers (the isolated `lo_profile` runs) are closed. `--cerrar-libreoffice` closes **every** LibreOffice process first and warns that unsaved documents are lost. The `Could not find platform independent libraries <prefix>` warning on stderr is benign. Do **not** launch `soffice` through a shell background operator or `Start-Process`: the child inherits the pipe handle and the reader hangs (see `references/word-toc-fields.md`).
 
 7. **Verify before delivering** with `python scripts/apa7.py verify --pdf "document.pdf" --manifiesto "MANIFEST.json"`: cover in 3 zones and members in a single paragraph (**this is checked, as a warning**), indices with the correct page number, captions with number and title, tables with content, **each table with its note below it in the PDF**, **each figure note above its image**, references with hanging indent. `verify` picks the `.venv` interpreter on its own, because that is where `pymupdf` lives. The cover warnings (logo or instructor title not asked about) **are not failures**: they are reported to the user and the document is delivered. If a critical check fails, fix and export again.
 
@@ -204,9 +212,12 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 - **Inventory of tables/figures**: the TOC always; lists of tables and figures only if they exist. If the analysis does not find them, **ask** before assuming.
 - Format: letter size and APA 7th edition margins, with no extra institutional rules.
 - References: always normalized to APA format.
-- Glued words: always fixed (missing spaces, "2:Word", "ACTIVIDAD1:"). Pure UPPERCASE acronyms (`OWASP`, `CVSS`) are never split, because the rule needs lowercase followed by uppercase.
+- Glued words: always fixed (missing spaces, "2:Word", "ACTIVIDAD1:"). Pure UPPERCASE acronyms (`OWASP`, `CVSS`) are never split, because the rule needs lowercase followed by uppercase. **Protected automatically, never split and never reported:** URLs, DOIs, e-mails and file names with an extension.
 - Cover author list: comma-separated, with "y" before the last one, regardless of count. `autores` accepts `"Nombre Apellido y Nombre Apellido"` or `["Nombre Apellido", "Nombre Apellido"]`; the text is kept as-is, not split.
-- **Reviewing the deglue is part of the job.** There is no list of untouchable terms: the pipeline carries no data about a document it has not read. Two queues come out of the analysis and both are answered in the source `.md`: the recorded **changes** (what the deglue split) and the **residue report** (stretches of glued characters it could not separate with confidence, typically brand or project names stuck to the sentence). Fix a real term in the `.md` and re-run the parser. Never patch the generated `.docx` by hand.
+- **Reviewing the deglue is part of the job.** The parser ships no whitelist of untouchable terms: it carries no data about a document it has not read. The report splits the changes into two queues, both answered in the source `.md`:
+  - **Clear** corrections: an obvious missing space (`ACTIVIDAD4` → `ACTIVIDAD 4`).
+  - **Review** (ambiguous): mixed alphanumeric or camelCase (`JavaScript` → `Java Script`, `SHA256` → `SHA 256`), i.e. it could well be a real product name or variable.
+  For every ambiguous one, do NOT accept blindly: either add the term to a protected-terms file (one per line, exact, case-sensitive) and re-run with `--terminos-protegidos <ARCHIVO>` so it stays intact, or ask the user. Also review the **residue report** (stretches the deglue could not separate with confidence). Fix a real term in the `.md` and re-run the parser. Never patch the generated `.docx` by hand.
 
 ## Skill files
 
@@ -215,13 +226,14 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 | `SKILL.md` | This document. |
 | `references/apa7-format.md` | APA 7 formatting rules (page, typography, heading levels, tables/figures, glued words, references). |
 | `references/institutional-cover.md` | 3-zone cover layout, fields, and what to do when information is missing. |
-| `references/word-toc-fields.md` | How to make the TOC and the indices functional (`PAGEREF`, `updateFields`), `docx` library pitfalls, and how to invoke LibreOffice without hanging it. |
+| `references/word-toc-fields.md` | How to make the TOC and the indices functional (real `TOC` fields, outline levels, `SEQ` captions, the two-pass page measurement, `updateFields`), `docx` library pitfalls, and how to invoke LibreOffice without hanging it. |
 | `references/system-requirements.md` | Requirements, preflight, installation and path resolution. |
 | `scripts/apa7.py` | **The entry point.** `check`, `install`, `export`, and `parse` / `build` / `verify` as thin dispatchers that forward their options to the scripts below. |
-| `scripts/md-a-manifiesto.py` | `.md` + layout JSON → `MANIFEST.json`. Enriches, deduplicates, deglues, computes sizes (from the JSON `bbox` when present), applies the default note and leaves the blocking questions in `diagnostico`. Reached through `apa7.py parse`; flags: `--md`, `--out`, `--log`, `--base-dir`, `--portada`, `--sin-deglue`, `--titulos-tabla-json`, `--titulos-figura-json`, `--notas-tabla-json`, `--notas-figura-json`, `--detectar-niveles-en-linea`, `--sin-indice-tablas`, `--sin-indice-figuras`, `--docling-json`, `--pdf`, `--ancho-max-tabla` (run `apa7.py parse --help` for the full list). |
-| `scripts/build-docx.js` | `MANIFEST.json` → `.docx` (cover, indices, tables, figures, references). Splits the body into sections and moves tables that do not fit in portrait to a landscape page. **Aborts with code 4 if a title or caption is missing.** Reached through `apa7.py build`. |
-| `scripts/verificar-pdf.py` | Verifies the `.pdf` (pymupdf): cover, indices, captions, indents, table notes below and figure notes above the image. Reached through `apa7.py verify`. |
-| `scripts/lib/rutas.py` | Portable resolution of paths, Python, Node and LibreOffice, plus the version pins. |
+| `scripts/md-a-manifiesto.py` | `.md` + layout JSON → `MANIFEST.json`. Enriches, deduplicates, deglues, computes sizes (from the JSON `bbox` when present), applies the default note and leaves the blocking questions in `diagnostico`. Reached through `apa7.py parse`; flags: `--md`, `--out`, `--log`, `--base-dir`, `--portada`, `--sin-deglue`, `--terminos-protegidos`, `--titulos-tabla-json`, `--titulos-figura-json`, `--notas-tabla-json`, `--notas-figura-json`, `--detectar-niveles-en-linea`, `--sin-indice-tablas`, `--sin-indice-figuras`, `--docling-json`, `--pdf`, `--ancho-max-tabla` (run `apa7.py parse --help` for the full list). |
+| `scripts/build-docx.js` | `MANIFEST.json` → `.docx` (cover, indices as real `TOC` fields, tables, figures, references). Splits the body into sections and moves tables that do not fit in portrait to a landscape page. Accepts `--paginas-json` to cache the index page numbers (second pass). **Aborts with code 4 if a title or caption is missing.** Reached through `apa7.py build`. |
+| `scripts/paginas-de-pdf.py` | Reads the throwaway PDF of the first pass and writes the real 1-based page of each section/table/figure, for the second `--paginas-json` build. Reached through `apa7.py build`; run with `--pdf`, `--manifiesto`, `--out`. |
+| `scripts/verificar-pdf.py` | Verifies the `.pdf` (pymupdf): cover, indices, captions, indents, table notes below and figure notes above the image, plus that the index page numbers match the real pages. Reached through `apa7.py verify`. |
+| `scripts/lib/rutas.py` | Portable resolution of paths, Python, Node and LibreOffice, the version pins, and the isolated-profile LibreOffice runner with its per-profile process cleanup. |
 | `scripts/lib/instalador.py` | Installation plans per package manager and the non-interactive elevation. |
 | `scripts/lib/fuentes.py` | Which embedded font names the verifier accepts: Times New Roman and its metric-compatible substitutes. |
 | `scripts/tests/` | Unit tests, run with `python -m unittest discover -s scripts/tests -t scripts/tests`. |

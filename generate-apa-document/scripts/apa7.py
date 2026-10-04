@@ -36,6 +36,8 @@ Optional environment variables
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -101,7 +103,7 @@ def cmd_check(_args):
             report(False, "Python",
                    "the skill's virtual environment exists but does not run: %s "
                    "(its base interpreter was moved, removed or upgraded). Recreate "
-                   "it with: python scripts/apa7.py install" % broken_venv)
+                   "it with: %s" % (broken_venv, rutas.comando_apa7("install")))
         else:
             report(False, "Python",
                    "not found (set APA7_PYTHON to an interpreter that has pymupdf)")
@@ -158,7 +160,8 @@ def cmd_check(_args):
         report(False, "docx (npm)", "not verifiable: Node.js missing")
     elif not package_json.is_file():
         report(False, "docx (npm)",
-               "not installed in %s (run: python scripts/apa7.py install)" % node_dir)
+               "not installed in %s (run: %s)"
+               % (node_dir, rutas.comando_apa7("install")))
     else:
         version = ""
         try:
@@ -217,7 +220,7 @@ def cmd_check(_args):
 
     sys.stdout.write("MISSING: %s\n" % ", ".join(missing))
     sys.stdout.write("RESULT: MISSING\n")
-    sys.stdout.write("Run: python scripts/apa7.py install\n")
+    sys.stdout.write("Run: %s\n" % rutas.comando_apa7("install"))
     sys.stdout.write("If that is not possible, stop the pipeline and tell the user.\n")
     return 1
 
@@ -236,10 +239,13 @@ def cmd_export(args):
 
     * An ISOLATED LibreOffice profile is used on every run (inside run_soffice).
       With the real profile, an already-open LibreOffice makes the conversion
-      hang silently.
-    * Leftover soffice processes are killed first. A soffice.bin that survived
-      a previous run makes the next --convert-to fail or hang, with no message
-      explaining why.
+      hang silently. Because of that isolation, an open LibreOffice of the user
+      is NOT a problem and is left alone.
+    * Only the skill's OWN leftovers are cleaned (the isolated `lo_profile`
+      runs). A soffice.bin from a previous interrupted run makes the next
+      --convert-to fail or hang, with no message explaining why, but killing the
+      user's LibreOffice (with unsaved documents) is not the fix. The explicit
+      `--cerrar-libreoffice` does close everything, and says so.
     * A timeout is reported BEFORE asking whether the PDF exists. A wedged
       LibreOffice would otherwise be diagnosed as a missing output file, which
       is a different problem with a different fix.
@@ -278,12 +284,21 @@ def cmd_export(args):
         step("Expected output : %s" % expected)
 
         if not rutas.soffice_console():
-            step("LibreOffice is not installed. Run: python scripts/apa7.py install", "FAIL")
+            step("LibreOffice is not installed. Run: %s"
+                 % rutas.comando_apa7("install"), "FAIL")
             return 1
 
-        leftovers = rutas.kill_soffice_processes()
-        if leftovers:
-            step("Cleaned up %d leftover LibreOffice process(es)" % leftovers)
+        if getattr(args, "cerrar_libreoffice", False):
+            ajenos = rutas.kill_soffice_processes()
+            step("--cerrar-libreoffice: closed %d LibreOffice process(es). Any "
+                 "open document with unsaved changes has been lost." % ajenos,
+                 "WARN")
+        else:
+            # Only our own runs (isolated `lo_profile`), never the user's.
+            leftovers = rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
+            if leftovers:
+                step("Cleaned up %d leftover LibreOffice process(es) from an "
+                     "interrupted run" % leftovers)
 
         if expected.exists():
             expected.unlink()
@@ -317,7 +332,7 @@ def cmd_export(args):
                  % args.timeout, "FAIL")
             step("The conversion was aborted, not failed silently. Raise --timeout, or "
                  "check whether a previous soffice process is stuck, and retry.", "FAIL")
-            killed = rutas.kill_soffice_processes()
+            killed = rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
             if killed:
                 step("Killed %d leftover LibreOffice process(es) from the aborted run." % killed,
                      "WARN")
@@ -340,9 +355,11 @@ def cmd_export(args):
         step("Unexpected error: %s" % exc, "FAIL")
         return 1
     finally:
-        # The whole tree, not just the launcher: a soffice.bin child that
-        # survives makes the NEXT --convert-to fail.
-        rutas.kill_soffice_processes()
+        # Only our own isolated-profile run: the whole tree, not just the
+        # launcher, because a surviving soffice.bin makes the NEXT --convert-to
+        # fail. The user's LibreOffice is not ours to close (see
+        # --cerrar-libreoffice).
+        rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
 
         # The isolated profile is thousands of files. It is only useful during
         # the conversion, so it is always removed; the .log files are kept
@@ -435,6 +452,20 @@ def _run_install(argv, cwd=None, timeout=1800):
 
 
 def cmd_install(args):
+    """Run the installer, telling the rest of the code whether it is simulating.
+
+    Kept as a thin wrapper so the dry-run flag is set for the WHOLE body, and
+    always cleared afterwards (tests reuse the process). Without it, workdir()
+    would create the working directory even for `install --dry-run`.
+    """
+    rutas.set_dry_run(getattr(args, "dry_run", False))
+    try:
+        return _cmd_install(args)
+    finally:
+        rutas.set_dry_run(False)
+
+
+def _cmd_install(args):
     """Install whatever `check` reported as missing.
 
     Idempotent: a tool that is already present is not touched. At the end it
@@ -478,7 +509,7 @@ def cmd_install(args):
                 for line in instalador.manual_instructions(
                         tool, rutas.is_windows(), rutas.is_macos()):
                     sys.stderr.write("  %s\n" % line)
-        sys.stderr.write("Then run: python scripts/apa7.py check\n")
+        sys.stderr.write("Then run: %s\n" % rutas.comando_apa7("check"))
         return 1
 
     step("Package manager available: %s (%s)" % (manager.name, manager.path))
@@ -506,11 +537,16 @@ def cmd_install(args):
         # Only fatal if this run was supposed to end up with Node in it. With
         # --only libreoffice there is nothing to be done about npm, and bailing
         # out here would silently skip the step the user actually asked for.
-        if wants("node") or wants("docx"):
+        # During a dry run npm is missing because nothing was installed, which
+        # is the point of a dry run, not a failure.
+        if args.dry_run and (wants("node") or wants("docx")):
+            step("[dry-run] npm would be used once Node.js is installed.")
+        elif wants("node") or wants("docx"):
             sys.stderr.write("FAILED: npm is not available after installing "
                              "Node.js.\n")
             return 1
-        step("npm is unavailable and --only excludes Node/docx: skipping that step.")
+        else:
+            step("npm is unavailable and --only excludes Node/docx: skipping that step.")
 
     # --- 2. docx library -----------------------------------------------------
     module_dir = rutas.node_dir() / "node_modules" / "docx"
@@ -519,17 +555,24 @@ def cmd_install(args):
     elif not wants("docx"):
         step("docx is missing and --only excludes it: skipping.")
     elif not npm:
-        step("docx cannot be installed without npm: skipping.")
+        if args.dry_run:
+            step("[dry-run] would install docx@%s once npm is available."
+                 % rutas.DEPS["docx"])
+        else:
+            step("docx cannot be installed without npm: skipping.")
     else:
+        # The directory and the npm anchor are only created once the install is
+        # actually going ahead. They used to be written before _confirm, so a
+        # --dry-run left an empty node_dir and a package.json behind: the one
+        # gate that is supposed to make dry runs safe was leaking writes.
         node_dir = rutas.node_dir()
-        node_dir.mkdir(parents=True, exist_ok=True)
-        anchor = node_dir / "package.json"
-        if not anchor.exists():
-            anchor.write_text(instalador.npm_anchor_json(), encoding="utf-8")
-            step("Created npm anchor: %s" % anchor)
-
         description = "npm install docx@%s in %s" % (rutas.DEPS["docx"], node_dir)
         if _confirm(description, args.yes, args.dry_run):
+            node_dir.mkdir(parents=True, exist_ok=True)
+            anchor = node_dir / "package.json"
+            if not anchor.exists():
+                anchor.write_text(instalador.npm_anchor_json(), encoding="utf-8")
+                step("Created npm anchor: %s" % anchor)
             step("Installing docx@%s..." % rutas.DEPS["docx"])
             if _run_install(instalador.npm_install_docx(
                     npm, node_dir, rutas.DEPS["docx"]), cwd=node_dir) != 0:
@@ -539,7 +582,7 @@ def cmd_install(args):
                 sys.stderr.write("FAILED: docx is still not in %s\n" % module_dir)
                 return 1
             step("docx (npm) installed.")
-        else:
+        elif not args.dry_run:
             step("docx is missing and the run was not confirmed: skipped.")
 
     # --- 3. Python interpreter ----------------------------------------------
@@ -575,7 +618,7 @@ def cmd_install(args):
                                      "python", rutas.is_windows(), rutas.is_macos())[0])
                 return 1
             base = rutas.python_path()
-        else:
+        elif not args.dry_run:
             step("No Python interpreter and the run was not confirmed: skipping "
                  "the virtual environment and pymupdf.")
     if base:
@@ -590,16 +633,24 @@ def cmd_install(args):
     venv_dir = rutas.skill_root() / ".venv"
     venv_exe = _venv_executable(venv_dir)
 
-    if venv_exe.is_file() and not rutas.python_works(str(venv_exe)):
-        # A venv records the absolute path of its base interpreter (pyvenv.cfg),
-        # so if that interpreter moved or was upgraded the venv exists but cannot
-        # run. It cannot be repaired, only rebuilt.
-        step("The virtual environment exists but does not run (its base "
-             "interpreter moved or was upgraded). Recreating it...")
-        if not args.dry_run:
+    # A venv records the absolute path of its base interpreter (pyvenv.cfg), so
+    # if that interpreter moved or was upgraded the venv exists but cannot run.
+    # It cannot be repaired, only rebuilt.
+    venv_broken = venv_exe.is_file() and not rutas.python_works(str(venv_exe))
+    if venv_broken:
+        if args.dry_run:
+            step("[dry-run] would rebuild the virtual environment at %s (its "
+                 "base interpreter moved or was upgraded)." % venv_dir)
+        else:
+            step("The virtual environment does not run (its base interpreter "
+                 "moved or was upgraded). Recreating it...")
             rutas.remove_tree(venv_dir)
 
-    if venv_exe.is_file():
+    if venv_broken and args.dry_run:
+        # It would have been rebuilt; do not report the broken one as present,
+        # and do not try to install into it.
+        pass
+    elif venv_exe.is_file():
         step("Virtual environment present: %s" % venv_exe)
     elif not base:
         # Nothing to build a venv with; step 3 already said so.
@@ -617,7 +668,7 @@ def cmd_install(args):
             sys.stderr.write("FAILED to create the virtual environment.\n")
             return 1
         step("Virtual environment created.")
-    else:
+    elif not args.dry_run:
         step("No virtual environment and the run was not confirmed: skipped.")
 
     # From here on the venv interpreter is the one that matters, whatever the
@@ -634,7 +685,7 @@ def cmd_install(args):
                     sys.stderr.write("FAILED to install pymupdf==%s.\n" % pin)
                     return 1
                 step("pymupdf installed.")
-            else:
+            elif not args.dry_run:
                 step("pymupdf missing or wrong version and the run was not "
                      "confirmed: skipping.")
         else:
@@ -698,8 +749,8 @@ def _forwarded(args):
 
 def _forward(rest, interpreter, script, label, usage):
     if not rest:
-        sys.stderr.write("%s: no arguments.\nUsage: python scripts/apa7.py %s\n"
-                         % (label, usage))
+        sys.stderr.write("%s: no arguments.\nUsage: %s %s\n"
+                         % (label, rutas.comando_apa7(), usage))
         return 2
     if not Path(script).is_file():
         sys.stderr.write("ERROR: %s not found at %s\n" % (label, script))
@@ -717,20 +768,112 @@ def cmd_parse(args):
                     "parse --md FILE.md --out MANIFEST.json [options]")
 
 
+def _valor_de(rest, nombre):
+    """Value of `--nombre` in a forwarded argument list, or None."""
+    for i, argumento in enumerate(rest):
+        if argumento == nombre and i + 1 < len(rest):
+            return rest[i + 1]
+        if argumento.startswith(nombre + "="):
+            return argumento.split("=", 1)[1]
+    return None
+
+
+def _manifiesto_con_toc(rest):
+    """The manifest if it asks for real TOC fields, else None.
+
+    Only `toc_campos: false` turns them off; any other value (including the
+    option being absent) keeps the default, which is to build them.
+    """
+    ruta = _valor_de(rest, "--manifiesto")
+    if not ruta or not Path(ruta).is_file():
+        return None
+    try:
+        with open(ruta, encoding="utf-8") as fh:
+            manifiesto = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if (manifiesto.get("opciones") or {}).get("toc_campos") is False:
+        return None
+    return manifiesto
+
+
+def _segunda_pasada_indices(node, build_js, rest):
+    """Fill the indexes' page numbers by exporting once and rebuilding.
+
+    A TOC field's result is computed by the rendering engine, never by
+    build-docx.js, so the page numbers are only known after a real export. The
+    sequence is: export the first .docx to a throwaway PDF, read the page of
+    every entry with paginas-de-pdf.py, and rebuild the .docx passing that map
+    with --paginas-json. Its numbers become the fields' cached result.
+
+    Any missing piece (no venv, no LibreOffice, an unreadable PDF) leaves the
+    first .docx as the final one: the indexes then ship without numbers and Word
+    fills them in when the document is opened. It is a degradation, not a
+    failure, so the exit code of the first build is kept.
+    """
+    docx = _valor_de(rest, "--out")
+    ruta_manifiesto = _valor_de(rest, "--manifiesto")
+    if not docx or not ruta_manifiesto or not Path(docx).is_file():
+        return 0
+
+    interpreter = rutas.venv_python()
+    if not (interpreter and rutas.python_works(interpreter)):
+        return 0
+
+    trabajo = Path(docx).resolve().parent / "_logs"
+    trabajo.mkdir(parents=True, exist_ok=True)
+    mapa = trabajo / "paginas.json"
+
+    # Pass 1: export with the fields unresolved. cmd_export is reused so there is
+    # one LibreOffice code path, not two. Its stdout (the PDF path) is swallowed:
+    # build's own contract must not gain stray lines.
+    with contextlib.redirect_stdout(io.StringIO()):
+        codigo = cmd_export(argparse.Namespace(
+            docx=str(docx), outdir=str(trabajo),
+            log=str(trabajo / "04-paginas.log"), timeout=300))
+    if codigo != 0:
+        return 0
+    pdf = trabajo / (Path(docx).stem + ".pdf")
+    if not pdf.is_file():
+        return 0
+
+    generador = rutas.skill_script("paginas-de-pdf.py")
+    if not Path(generador).is_file():
+        return 0
+    codigo = subprocess.call([str(interpreter), str(generador),
+                              "--pdf", str(pdf),
+                              "--manifiesto", str(ruta_manifiesto),
+                              "--out", str(mapa)])
+    if codigo != 0 or not mapa.is_file():
+        return 0
+
+    # Pass 2: rebuild with the measured pages cached inside the TOC fields.
+    return subprocess.call([str(node), str(build_js)] + list(rest)
+                           + ["--paginas-json", str(mapa)])
+
+
 def cmd_build(args):
     """MANIFEST.json -> .docx.
 
     Needs Node.js. The script resolves the docx package from the workdir by
     absolute path, so the working directory does not matter here.
+
+    When the manifest asks for real TOC fields, this runs build-docx.js twice
+    (see _segunda_pasada_indices): the page numbers of the indexes only exist
+    after a real export, which needs the .docx from the first run.
     """
     node = rutas.node_path()
     if not node:
-        sys.stderr.write("ERROR: Node.js not found.\nRun: "
-                         "python scripts/apa7.py install --only node\n")
+        sys.stderr.write("ERROR: Node.js not found.\nRun: %s\n"
+                         % rutas.comando_apa7("install", "--only", "node"))
         return 1
-    return _forward(_forwarded(args), node, rutas.skill_script("build-docx.js"),
-                    "build",
-                    "build --manifiesto MANIFEST.json --out salida.docx [--log log.txt]")
+    rest = _forwarded(args)
+    build_js = rutas.skill_script("build-docx.js")
+    codigo = _forward(rest, node, build_js, "build",
+                      "build --manifiesto MANIFEST.json --out salida.docx [--log log.txt]")
+    if codigo != 0 or _manifiesto_con_toc(rest) is None:
+        return codigo
+    return _segunda_pasada_indices(node, build_js, rest)
 
 
 def cmd_verify(args):
@@ -745,9 +888,9 @@ def cmd_verify(args):
     if not (interpreter and rutas.python_works(interpreter)):
         sys.stderr.write(
             "WARNING: no usable virtual environment at %s; running verify with "
-            "%s instead.\nIf pymupdf turns out to be missing, run: "
-            "python scripts/apa7.py install --only pymupdf\n"
-            % (rutas.skill_root() / ".venv", sys.executable))
+            "%s instead.\nIf pymupdf turns out to be missing, run: %s\n"
+            % (rutas.skill_root() / ".venv", sys.executable,
+               rutas.comando_apa7("install", "--only", "pymupdf")))
         interpreter = sys.executable
     return _forward(_forwarded(args), interpreter,
                     rutas.skill_script("verificar-pdf.py"), "verify",
@@ -811,6 +954,12 @@ def main(argv=None):
                                help="log file (default: <outdir>/_logs/03-export.log)")
     export_parser.add_argument("--timeout", type=int, default=300,
                                help="maximum wait in seconds (default: 300)")
+    export_parser.add_argument(
+        "--cerrar-libreoffice", dest="cerrar_libreoffice", action="store_true",
+        help="before converting, close EVERY LibreOffice process, including the "
+             "user's open documents (unsaved work is lost). Off by default: the "
+             "conversion does not need it and only the skill's own leftovers are "
+             "cleaned.")
     export_parser.set_defaults(handler=cmd_export)
 
     install_parser = subparsers.add_parser(

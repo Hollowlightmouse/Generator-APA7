@@ -129,21 +129,34 @@ automatically, but it is worth reviewing them while reading the `.md`.
    `2: Diferenciacion`.
 3. Number attached to a word: `ACTIVIDAD1` -> `ACTIVIDAD 1`.
 
-**Cases that are NOT separated:**
+**Protected automatically (never separated, never reported):**
 
 - Pure uppercase acronyms (`OWASP`, `CVSS`, `BPMN`): the rule requires lowercase
   followed by uppercase, so they are already safe.
-- Nothing else, and that is a deliberate limit. camelCase names (`NodeJS`,
-  `OpenID`, `MySQL`) and those mixing letters and digits (`IPv6`, `SHA256`)
-  cannot be told apart from a real gluing by pattern, and the pipeline carries
-  **no list of untouchable terms**: that data belongs to one concrete document,
-  not to the tool. Prefixed surnames (`McDonald`, `MacArthur`) fall in the same
-  case.
+- URLs (`https://...`, `www...`), DOIs (`10.1038/...`), e-mails and file names
+  with an extension (`informe_v2.docx`). They are set aside before any rule runs
+  and put back byte for byte, so a query string is never broken.
 
-The un-gluing is never silent: **everything that changes is recorded** and can
-be reviewed before building the `.docx`. A term split that should not have been
-(`NodeJS` → `Node JS`) is corrected in the source `.md` and the parser is run
-again.
+**Ambiguous (separated, but flagged for review):**
+
+camelCase names (`NodeJS`, `OpenID`, `MySQL`) and terms mixing letters and
+digits (`IPv6`, `SHA256`) cannot be told apart from a real gluing by pattern
+alone. The parser still separates them, but the report lists them under
+**Review**, not among the clear corrections, because they may well be the real
+spelling of a product or a variable.
+
+**How to keep a term intact:** write the terms, one per line (exact,
+case-sensitive), in a text file and pass it with `--terminos-protegidos
+<ARCHIVO>` (through `apa7.py parse`). Protected terms are masked just like URLs
+and never appear in the change report. This is the alternative to editing the
+source `.md`; use whichever the user prefers.
+
+The un-gluing is never silent: **everything that changes is recorded**, split
+into clear corrections and items to review, before building the `.docx`. A term
+split that should not have been (`NodeJS` → `Node JS`) is either added to the
+protected-terms file and the parser re-run, or corrected in the source `.md`
+and the parser re-run. Prefixed surnames (`McDonald`, `MacArthur`) are handled
+the same way.
 
 ## References
 

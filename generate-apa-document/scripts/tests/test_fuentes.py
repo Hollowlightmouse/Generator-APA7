@@ -62,6 +62,13 @@ class TestClasifica(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(legible, "DejaVu Serif")
 
+    def test_arial_is_refused_even_with_the_mt_suffix(self):
+        # Regression: "ArialMT" used to be listed as a metric clone, so a
+        # document in Arial (a different family) passed the typography check.
+        ok, _, legible = fuentes.clasifica("ArialMT")
+        self.assertFalse(ok)
+        self.assertEqual(legible, "Arial")
+
     def test_an_unknown_font_is_refused(self):
         ok, _, _ = fuentes.clasifica("ComicPapyrusStd")
         self.assertFalse(ok)
