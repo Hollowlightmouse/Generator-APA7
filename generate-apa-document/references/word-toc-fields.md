@@ -208,7 +208,9 @@ the script hang:
   pipe handle can keep `soffice` alive after the parent has finished, so a
   reader on that pipe never sees EOF. That is what used to leave the pipeline
   hanging with no output. The files are read after the process ends, then
-  deleted; the log is kept in `<outdir>/_logs/03-export.log`.
+  deleted; the log goes to `<md>_apa/logs/03-export.log`. Passing `--outdir`
+  without `--carpeta-trabajo` keeps the historical behaviour instead (PDF and
+  log together in `<outdir>/_logs/03-export.log`).
 - **Do not use a shell background operator or `Start-Process`.** A nested
   redirection on top of an already-redirected parent leaves LibreOffice never
   finishing.
@@ -230,12 +232,17 @@ the script hang:
 ## Measuring the pages (the double pass)
 
 `scripts/paginas-de-pdf.py` reads the throwaway PDF and writes the page map that
-the second `build` consumes:
+the second `build` consumes. Invoked by `apa7.py build` it is called **without**
+`--out`, so the map lands in the working folder as `<md>_apa/logs/paginas.json`:
 
 ```bash
-python scripts/paginas-de-pdf.py --pdf <tmp>/salida.pdf \
-    --manifiesto <manifiesto.json> --out <tmp>/paginas.json
+python scripts/paginas-de-pdf.py --pdf <md>_apa/logs/<stem>.pdf \
+    --manifiesto <manifiesto.json>
 ```
+
+The throwaway PDF itself is **deleted once the second pass succeeds**, because it
+is a by-product rather than evidence; if the second pass fails it is **kept**,
+since it is then the only record of what was actually measured.
 
 - **Sections**: `doc.get_toc()` returns the PDF outline built from the applied
   outline levels, with **1-based** pages. Each manifest section is matched to

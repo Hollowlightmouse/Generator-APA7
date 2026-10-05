@@ -115,13 +115,78 @@ class TestNotaDeTabla(_Base):
 
     def test_bloque_fusionado_pasa(self):
         # Regression: block extraction merges the cells and the note into one
-        # block ('Tabla 1\\n1 2 3 4 5 6\\nNota. Elaboracion propia'). The old
+        # block ('Tabla 1\n1 2 3 4 5 6\nNota. Elaboracion propia'). The old
         # check required the block to START with "Nota." and failed; the
         # word-level check must pass.
         man = self._escribe("m3.json", manifiesto())
         pdf = self._pdf_un_bloque("fusionado.pdf",
                                   "Tabla 1\n1 2 3 4 5 6\nNota. Elaboracion propia")
         self.assertTrue(self._verifica(pdf, man)[self.CLAVE]["ok"])
+
+    def test_tabla_que_ocupa_varias_paginas_pasa(self):
+        # Regression: a table wider than a page ends on the next one and its
+        # note follows there. Looking only at the label's page reported a false
+        # critical FAIL for every such table.
+        man = self._escribe("m4.json", manifiesto())
+        ruta = os.path.join(self.tmp, "multipagina.pdf")
+        doc = pymupdf.open()
+        p1 = doc.new_page(width=612, height=792)
+        p1.insert_text((72, 72), "Tabla 1", fontsize=12)
+        p1.insert_text((72, 100), "1 2 3 4 5 6", fontsize=12)
+        p2 = doc.new_page(width=612, height=792)
+        p2.insert_text((72, 72), "6 5 4 3 2 1", fontsize=12)
+        p2.insert_text((72, 100), "Nota. Elaboracion propia", fontsize=12)
+        doc.save(ruta)
+        doc.close()
+        self.assertTrue(self._verifica(ruta, man)[self.CLAVE]["ok"])
+
+    def test_nota_en_la_pagina_siguiente_sobre_la_siguiente_tabla_pasa(self):
+        # The note lands at the top of the page where the NEXT caption starts,
+        # so the search window ends at that caption instead of at the page end.
+        man = self._escribe("m5.json", manifiesto(2))
+        ruta = os.path.join(self.tmp, "nota_encima_de_la_siguiente.pdf")
+        doc = pymupdf.open()
+        p1 = doc.new_page(width=612, height=792)
+        p1.insert_text((72, 72), "Tabla 1", fontsize=12)
+        p1.insert_text((72, 100), "1 2 3 4 5 6", fontsize=12)
+        p2 = doc.new_page(width=612, height=792)
+        p2.insert_text((72, 72), "Nota. Elaboracion propia", fontsize=12)
+        p2.insert_text((72, 140), "Tabla 2", fontsize=12)
+        p2.insert_text((72, 168), "1 2 3 4 5 6", fontsize=12)
+        p2.insert_text((72, 196), "Nota. Elaboracion propia", fontsize=12)
+        doc.save(ruta)
+        doc.close()
+        self.assertTrue(self._verifica(ruta, man)[self.CLAVE]["ok"])
+
+    def test_mencion_en_texto_no_cuenta_como_rotulo(self):
+        # Regression: "Tabla 1" inside a sentence is not a caption. Taking it
+        # for one moved the search window and hid the real note.
+        man = self._escribe("m6.json", manifiesto())
+        pdf = self._pdf_con_lineas("mencion.pdf",
+                                   ["Como se ve en la Tabla 1 el riesgo aumenta",
+                                    "Tabla 1",
+                                    "1 2 3 4 5 6",
+                                    "Nota. Elaboracion propia"])
+        self.assertTrue(self._verifica(pdf, man)[self.CLAVE]["ok"])
+
+    def test_nota_de_otra_tabla_no_cuenta(self):
+        # The note of the next table must not vouch for the previous one.
+        man = self._escribe("m7.json", manifiesto(2))
+        ruta = os.path.join(self.tmp, "nota_cruzada.pdf")
+        doc = pymupdf.open()
+        doc.new_page(width=612, height=792)
+        p2 = doc.new_page(width=612, height=792)
+        p1 = doc[0]
+        p1.insert_text((72, 72), "Tabla 1", fontsize=12)
+        p1.insert_text((72, 100), "1 2 3 4 5 6", fontsize=12)
+        p2.insert_text((72, 72), "Tabla 2", fontsize=12)
+        p2.insert_text((72, 100), "1 2 3 4 5 6", fontsize=12)
+        p2.insert_text((72, 128), "Nota. Elaboracion propia", fontsize=12)
+        doc.save(ruta)
+        doc.close()
+        res = self._verifica(ruta, man)[self.CLAVE]
+        self.assertFalse(res["ok"])
+        self.assertIn("Tabla 1", res["detalle"])
 
 
 class TestNumeracion(_Base):

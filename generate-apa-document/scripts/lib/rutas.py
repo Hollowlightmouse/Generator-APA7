@@ -26,14 +26,17 @@ Supported environment variables (all optional):
     APA7_WORKDIR     working directory (where node_modules/docx lives)
     APA7_NODEDIR     directory that contains node_modules/docx
 """
+import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -179,6 +182,250 @@ def node_dir():
     """Directory that MUST contain node_modules/docx."""
     override = os.environ.get("APA7_NODEDIR")
     return Path(override).expanduser() if override else workdir()
+
+
+# ---------------------------------------------------------------------------
+# Where one document's files live
+# ---------------------------------------------------------------------------
+# Every document gets exactly ONE working folder next to it, `<nombre>_apa/`,
+# holding `datos/` (the manifest plus everything the agent writes) and `logs/`.
+# The .md stays where the user put it, the .docx and .pdf are delivered next to
+# it, and nothing else is left behind. This is what replaces the flat pile of
+# MANIFEST.json, portada.json and *.log that the old flow dropped in the user's
+# folder.
+#
+# GOLDEN RULE (the same one as above): no path of any specific machine is
+# hardcoded here. Everything is derived from the document the caller passed.
+SUFIJO_CARPETA_TRABAJO = "_apa"
+
+# Characters Windows forbids in a name, plus the ASCII control characters.
+_INVALIDOS = frozenset('<>:"/\\|?*') | frozenset(chr(c) for c in range(32))
+
+# CON, PRN, AUX, NUL, COM1-9 and LPT1-9 are device names on Windows: a folder
+# called CON cannot be created there, and it fails at mkdir rather than at write
+# time, which is the worst moment to find out.
+_RESERVADOS = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + ["COM%d" % n for n in range(1, 10)]
+    + ["LPT%d" % n for n in range(1, 10)]
+)
+
+# Windows still allows only 260 characters for a whole path, and the working
+# folder sits in the middle of it, so the name gets a ceiling of its own.
+MAX_NOMBRE = 60
+
+_SUFIJOS = (".md", ".markdown", ".docx", ".pdf", ".json")
+
+
+def sin_extension(nombre):
+    """`informe.md` -> `informe`; a name with no known suffix is returned as is."""
+    text = str(nombre)
+    for sufijo in _SUFIJOS:
+        if text.lower().endswith(sufijo):
+            return text[: -len(sufijo)]
+    return text
+
+
+def sanea_nombre(nombre, maximo=MAX_NOMBRE):
+    """One name component that Windows, macOS and Linux all accept.
+
+    Diacritics are dropped (NFKD + remove combining marks) instead of being
+    replaced by look-alikes, so the working folder can be typed on any keyboard.
+    Only the working folder is sanitized: the delivered .docx and .pdf keep the
+    original name, because that is the name the user recognizes and expects to
+    find.
+    """
+    plano = unicodedata.normalize("NFKD", str(nombre))
+    plano = "".join(c for c in plano if not unicodedata.combining(c))
+    plano = "".join("_" if c in _INVALIDOS else c for c in plano)
+    plano = re.sub(r"\s+", "_", plano).strip("._ ")[:maximo].rstrip("._ ") or "documento"
+    # Last, deliberately: the trailing "_" below has to survive the trim, and a
+    # name is only compared to the device list once it has its final shape.
+    if plano.upper() in _RESERVADOS:
+        plano += "_"
+    return plano
+
+
+@dataclass(frozen=True)
+class RutasDocumento:
+    """Every path one document's run needs, computed in one place."""
+    md: Path = None
+    entrega: Path = None
+    docx: Path = None
+    pdf: Path = None
+    trabajo: Path = None
+    datos: Path = None
+    logs: Path = None
+    manifiesto: Path = None
+    portada: Path = None
+    json_verificacion: Path = None
+    log_parse: Path = None
+    log_build: Path = None
+    log_export: Path = None
+    log_paginas: Path = None
+    log_verify: Path = None
+    paginas_json: Path = None
+    pdf_auxiliar: Path = None
+    aviso: str = ""
+
+
+def _resuelto(ruta):
+    return Path(ruta).expanduser().resolve() if ruta else None
+
+
+def _carpeta_existente(candidatos):
+    """First ancestor of any candidate that already IS a working folder.
+
+    "Is a working folder" means the name ends in the suffix AND `datos/` is
+    there, which is what this skill creates. That second condition is what keeps
+    a folder the user happens to call `algo_apa` from being mistaken for one.
+    """
+    for ruta in candidatos:
+        if not ruta:
+            continue
+        for padre in (ruta,) + tuple(ruta.parents):
+            if padre.name.endswith(SUFIJO_CARPETA_TRABAJO) and (padre / "datos").is_dir():
+                return padre
+    return None
+
+
+def _datos_fuente(trabajo):
+    """Contents of datos/fuente.json, or {}."""
+    try:
+        datos = json.loads((trabajo / "datos" / "fuente.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return datos if isinstance(datos, dict) else {}
+
+
+def _fuente_registrada(trabajo):
+    """The .md a working folder was built from, or None."""
+    return _datos_fuente(trabajo).get("md") or None
+
+
+def _contiene(la_carpeta, ruta):
+    """True when `ruta` is inside `la_carpeta` (or is it)."""
+    if not ruta:
+        return False
+    return ruta == la_carpeta or la_carpeta in ruta.parents
+
+
+def rutas_documento(md=None, salida=None, manifiesto=None, carpeta_trabajo=None, crear=False):
+    """Resolve one document's working folder and everything inside it.
+
+    `md`, `salida` and `manifiesto` are whatever the subcommand was given; each
+    one on its own is enough to find the working folder, tried in this order:
+      1. `carpeta_trabajo`, when the caller passed one.
+      2. an existing working folder the given path already lives in. This is the
+         one that matters: `build`, `export` and `verify` are never handed the
+         .md, so `datos/fuente.json` and the folder name are their only anchors.
+      3. `<folder of the artifact>/<name>_apa`.
+    """
+    md = _resuelto(md)
+    salida = _resuelto(salida)
+    manifiesto = _resuelto(manifiesto)
+
+    trabajo = _resuelto(carpeta_trabajo) if carpeta_trabajo else _carpeta_existente(
+        [salida, manifiesto, md])
+
+    base = md or salida or manifiesto
+    if trabajo is None and base is not None:
+        trabajo = base.parent / (sanea_nombre(sin_extension(base.name)) + SUFIJO_CARPETA_TRABAJO)
+    if trabajo is None:
+        # Nothing to anchor on. Inventing a folder here would write a stray
+        # `documento_apa/` into whatever the current directory happens to be.
+        raise ValueError(
+            "rutas_documento() needs md, salida, manifiesto or carpeta_trabajo")
+
+    # The deliverables land next to the .md. Without one (a build started from a
+    # bare manifest) they land next to whatever artifact we were handed, unless
+    # that artifact is itself inside the working folder, which would put the
+    # deliverable inside the very folder meant to hold the intermediates.
+    if md is not None:
+        entrega = md.parent
+    elif not _contiene(trabajo, base):
+        entrega = base.parent
+    else:
+        entrega = trabajo.parent
+
+    # The NAME of the document is what the .md was called, not what the artifact
+    # we happen to have been handed is called. Only `parse` sees the .md, so the
+    # name travels with the rest of the anchor in datos/fuente.json; without it
+    # a build driven from the manifest alone would produce "MANIFEST.docx".
+    nombre = _datos_fuente(trabajo).get("nombre")
+    if not nombre and md is not None:
+        nombre = md.name
+    if not nombre and base is not None:
+        nombre = base.name
+    stem = sin_extension(nombre) if nombre else "documento"
+
+    datos = trabajo / "datos"
+    logs = trabajo / "logs"
+
+    aviso = ""
+    if md is not None:
+        previa = _fuente_registrada(trabajo)
+        if previa and previa != str(md):
+            aviso = ("WARNING: %s was built from %s; rebuilding it from %s."
+                     % (trabajo, previa, md))
+
+    rutas = RutasDocumento(
+        md=md,
+        entrega=entrega,
+        docx=entrega / (stem + ".docx"),
+        pdf=entrega / (stem + ".pdf"),
+        trabajo=trabajo,
+        datos=datos,
+        logs=logs,
+        manifiesto=manifiesto or datos / "MANIFEST.json",
+        portada=datos / "portada.json",
+        json_verificacion=datos / "verificacion.json",
+        log_parse=logs / "01-analisis.log",
+        log_build=logs / "02-build.log",
+        log_export=logs / "03-export.log",
+        log_paginas=logs / "04-paginas.log",
+        log_verify=logs / "04-verificacion.log",
+        paginas_json=logs / "paginas.json",
+        # Named after the .docx because LibreOffice derives the output name from
+        # the input. It lives in logs/ and is deleted once the run succeeds.
+        pdf_auxiliar=logs / (stem + ".pdf"),
+        aviso=aviso,
+    )
+
+    if crear and trabajo is not None and not _DRY_RUN:
+        datos.mkdir(parents=True, exist_ok=True)
+        logs.mkdir(parents=True, exist_ok=True)
+    return rutas
+
+
+def anota_fuente(trabajo, md, crear=True):
+    """Record which .md a working folder belongs to. Returns a warning or "".
+
+    A mismatch is a WARNING and never an error. The working folder is derived
+    from the document the user just passed, and the .docx is a function of THAT
+    .md, not of whatever an earlier run left behind, so rebuilding is correct and
+    asking the user would break a run that has no terminal to ask in.
+
+    A working folder with no `fuente.json` is from a run that predates this file;
+    it is adopted silently and stamped with the current .md.
+    """
+    if not trabajo or not md:
+        return ""
+    trabajo = Path(trabajo)
+    md = _resuelto(md)
+    aviso = ""
+    previa = _fuente_registrada(trabajo)
+    if previa and previa != str(md):
+        aviso = ("WARNING: %s was built from %s; rebuilding it from %s."
+                 % (trabajo, previa, md))
+    if _DRY_RUN:
+        return aviso
+    if crear:
+        (trabajo / "datos").mkdir(parents=True, exist_ok=True)
+    (trabajo / "datos" / "fuente.json").write_text(
+        json.dumps({"md": str(md), "nombre": md.name}, indent=2) + "\n",
+        encoding="utf-8")
+    return aviso
 
 
 # ---------------------------------------------------------------------------

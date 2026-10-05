@@ -88,18 +88,45 @@ Almost everything comes from your files. The skill will only ask you for the **d
 
 ### 3. Receive the two files
 
-`.docx` and `.pdf` verified page by page, ready to submit.
+`.docx` and `.pdf` verified page by page, ready to submit, **next to the source `.md`** and with the same name.
+
+### Where the files land
+
+You do not pass `--out`, `--log`, `--outdir` or `--json`: each phase derives its own paths from the document it is handed.
+
+```
+<carpeta del .md>/
+  informe.md                 ← your source, untouched
+  informe.docx               ← deliverable, same name as the .md
+  informe.pdf                ← deliverable, same name as the .md
+  informe_apa/               ← working folder, name derived and sanitized
+    datos/
+      fuente.json            ← which .md this folder belongs to
+      MANIFEST.json          ← the manifest
+      verificacion.json      ← verification report
+    logs/
+      01-analisis.log        ← parse
+      02-build.log           ← build
+      paginas.json           ← measured page numbers (double pass)
+      03-export.log          ← export
+```
+
+- The deliverables keep the **original** name of the `.md`; only the working folder is renamed: no diacritics, invalid characters and spaces become `_`, Windows reserved names get a `_` suffix, capped at 60 characters (`Informe técnico.md` → `Informe_tecnico_apa/`).
+- **The working folder is reused, never versioned.** Rerunning the pipeline replaces the files in place instead of producing `informe (2).docx`.
+- **The throwaway PDF of the double pass is deleted** when the second pass succeeds; if it fails, that PDF stays, because it is the only record of what was measured. A failed verification likewise keeps its PDF and its whole working folder.
+- `--carpeta-trabajo <dir>` moves the working folder when the document lives elsewhere, and works on `parse`, `build`, `export` and `verify`.
+- **Explicit flags always win.** Passing `--outdir` to `export` keeps its old behaviour (PDF *and* `_logs/03-export.log` there), so existing scripts and callers are unaffected. That is the only case that still writes `_logs/`.
 
 ## Workflow
 
 1. **Activation** — the user asks for an academic document in APA (by intent).
 2. **STEP 0 · Preflight** — `apa7.py check` checks the tools. If something is missing, `apa7.py install` installs it and re-checks. If it does not return `RESULT: OK`, it stops and warns.
 3. **Inputs** — the `.md` (mandatory), the images and the layout JSON (optional) are received.
-4. **Parser** — `apa7.py parse` turns `.md` + layout JSON into `MANIFEST.json`: it enriches, deduplicates, splits glued words (protecting URLs, DOIs, e-mails, file names and any term passed with `--terminos-protegidos`), computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
+4. **Parser** — `apa7.py parse` turns `.md` + layout JSON into `MANIFEST.json` (in `<md>_apa/datos/`): it enriches, deduplicates, splits glued words (protecting URLs, DOIs, e-mails, file names and any term passed with `--terminos-protegidos`), computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
 5. **Mandatory questions (STEP 0.5)** — if `pendientes_bloqueantes` is not empty, the user is asked (cover data, missing titles/captions, "no tables/figures" confirmation) and nothing is built until they are resolved. The cover answers are saved in `portada.json` and passed to the parser with `--portada`.
-6. **Build the `.docx`** — `apa7.py build` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references. It runs in **two passes**: it exports the first `.docx` to a throwaway PDF, measures the real page of every entry with `paginas-de-pdf.py` and rebuilds with `--paginas-json` to cache those numbers in the `TOC` fields. Aborts with code 4 if a title or caption is missing.
-7. **Export to PDF** — `apa7.py export` converts `.docx → .pdf` with headless LibreOffice (temporary copy + isolated profile per run).
-8. **Verify** — `apa7.py verify` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes above their image and hanging indent in references. If a critical check fails, it is fixed and exported again.
+6. **Build the `.docx`** — `apa7.py build` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references, writing the `.docx` next to the source `.md`. It runs in **two passes**: it exports the first `.docx` to a throwaway PDF in `<md>_apa/logs/`, measures the real page of every entry with `paginas-de-pdf.py` and rebuilds with `--paginas-json` to cache those numbers in the `TOC` fields. The throwaway PDF is deleted once the second pass succeeds. Aborts with code 4 if a title or caption is missing.
+7. **Export to PDF** — `apa7.py export` converts `.docx → .pdf` with headless LibreOffice (temporary copy + isolated profile per run), writing the PDF next to the `.docx`.
+8. **Verify** — `apa7.py verify` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes above their image and hanging indent in references. If a critical check fails, it is fixed and exported again; nothing is deleted, so the failing PDF stays for inspection.
 9. **Deliver** — both files are delivered (`.docx` and `.pdf`).
 
 ```
@@ -111,7 +138,7 @@ Activation
                        └─ apa7.py build ──► document.docx
                             └─ apa7.py export (headless LibreOffice) ──► document.pdf
                                  └─ apa7.py verify ──► (failures) fix ──► re-export
-                                      └─ Delivery: .docx + .pdf
+                                      │       └── Delivery: .docx + .pdf next to the .md, plus informe_apa/ to inspect or delete
 ```
 
 ## How it works inside
@@ -146,7 +173,7 @@ Generator-APA7/
     │   ├── verificar-pdf.py              # .pdf verification (pymupdf) (apa7.py verify)
     │   ├── tests/                       # unit tests
     │   └── lib/
-    │       ├── rutas.py                  # portable path and tool resolution
+    │       ├── rutas.py                  # portable path and tool resolution, and where a document's files go
     │       ├── instalador.py             # installation plans per package manager
     │       └── fuentes.py                # font names accepted by the verifier
     ├── .work/                            # generated state (docx's node_modules)

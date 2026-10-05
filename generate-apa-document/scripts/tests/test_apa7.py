@@ -12,6 +12,7 @@ import ast
 import contextlib
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -278,7 +279,7 @@ class TestExport(CheckHarness):
 
     def _args(self, **overrides):
         values = {"docx": str(self.docx), "outdir": str(self.dir / "out"),
-                  "log": None, "timeout": 300}
+                  "log": None, "timeout": 300, "carpeta_trabajo": None}
         values.update(overrides)
         return argparse.Namespace(**values)
 
@@ -287,7 +288,8 @@ class TestExport(CheckHarness):
 
         def fake_run_soffice(arguments, timeout=300, log_dir=None):
             # Create what LibreOffice would have created.
-            expected = Path(values.outdir) / (self.docx.stem + ".pdf")
+            destino = Path(values.outdir) if values.outdir else self.docx.parent
+            expected = destino / (self.docx.stem + ".pdf")
             if getattr(soffice_result, "exit_code", 0) == 0 and not getattr(
                     soffice_result, "timed_out", False):
                 expected.parent.mkdir(parents=True, exist_ok=True)
@@ -321,9 +323,29 @@ class TestExport(CheckHarness):
         _, out, err = self._export(self._ok_result())
         self.assertNotIn("PHASE 3", out)
         self.assertIn("PHASE 3", err)
+        # --outdir was explicit, so it keeps meaning "PDF and logs here", which
+        # is the behavior every existing caller already depends on.
         log_file = self.dir / "out" / "_logs" / "03-export.log"
         self.assertTrue(log_file.is_file())
         self.assertIn("PDF generated", log_file.read_text(encoding="utf-8"))
+
+    def test_without_outdir_the_log_goes_to_the_documents_own_folder(self):
+        # No _logs/ next to the user's document: that pile is what this change
+        # exists to remove.
+        self._export(self._ok_result(), outdir=None)
+        log_file = self.dir / "doc_apa" / "logs" / "03-export.log"
+        self.assertTrue(log_file.is_file(), "03-export.log is not in %s" % log_file)
+        self.assertFalse((self.dir / "_logs").exists())
+
+    def test_carpeta_trabajo_redirects_the_logs_without_moving_the_pdf(self):
+        self._export(self._ok_result(), outdir=None,
+                     carpeta_trabajo=str(self.dir / "trabajo"))
+        self.assertTrue((self.dir / "trabajo" / "logs" / "03-export.log").is_file())
+        self.assertTrue((self.dir / "doc.pdf").is_file())
+
+    def test_an_explicit_log_is_respected(self):
+        _, _, _ = self._export(self._ok_result(), log=str(self.dir / "mio.log"))
+        self.assertTrue((self.dir / "mio.log").is_file())
 
     def test_a_missing_docx_fails_without_writing_to_stdout(self):
         code, out, err = self._export(self._ok_result(), docx=str(self.dir / "nope.docx"))
@@ -441,6 +463,39 @@ class TestExport(CheckHarness):
         run_soffice.assert_not_called()
         self.assertIn("apa7.py install", err.getvalue())
 
+    def test_without_docx_the_only_one_of_the_folder_is_exported(self):
+        code, out, err = self._export(self._ok_result(), docx=None, outdir=None,
+                                      carpeta_trabajo=str(self.dir))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), str(self.dir / "doc.pdf"))
+        self.assertIn("using the only .docx", err)
+
+    def test_several_docx_files_are_ambiguous_and_nothing_is_exported(self):
+        (self.dir / "otro.docx").write_bytes(b"PK\x03\x04fake")
+        code, out, err = self._export(self._ok_result(), docx=None, outdir=None,
+                                      carpeta_trabajo=str(self.dir))
+        self.assertEqual(code, 1)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("ambiguous", err)
+        self.assertIn("otro.docx", err)
+        self.assertFalse((self.dir / "doc.pdf").exists())
+
+    def test_a_folder_without_any_docx_is_reported(self):
+        vacio = self.dir / "vacio"
+        vacio.mkdir()
+        code, _, err = self._export(self._ok_result(), docx=None, outdir=None,
+                                    carpeta_trabajo=str(vacio))
+        self.assertEqual(code, 1)
+        self.assertIn("No .docx in", err)
+
+    def test_an_explicit_docx_wins_over_the_ones_in_the_folder(self):
+        (self.dir / "otro.docx").write_bytes(b"PK\x03\x04fake")
+        code, out, err = self._export(self._ok_result(), outdir=None,
+                                      carpeta_trabajo=str(self.dir))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), str(self.dir / "doc.pdf"))
+        self.assertNotIn("ambiguous", err)
+
 
 class _ExportResult:
     def __init__(self, values):
@@ -459,18 +514,27 @@ class TestForwarding(CheckHarness):
     `a.md --out b.json --md` and the target reports a missing value.
     """
 
-    def call(self, argv, **probes):
-        self.calls = []
-
+    def setUp(self):
         # Real files: cmd_forward checks is_file() before running anything, so
         # imaginary paths would short-circuit every case.
         scratch = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, scratch, True)
-        root = Path(scratch)
-        (root / "scripts").mkdir()
+        self.root = Path(scratch)
+        (self.root / "scripts").mkdir()
         for name in ("md-a-manifiesto.py", "build-docx.js", "verificar-pdf.py"):
-            (root / "scripts" / name).write_text("", encoding="utf-8")
-        self.venv = str(root / ".venv" / "bin" / "python3")
+            (self.root / "scripts" / name).write_text("", encoding="utf-8")
+        self.venv = str(self.root / ".venv" / "bin" / "python3")
+
+        # Relative paths are resolved against the current directory, and these
+        # subcommands now derive a working folder from the document they are
+        # handed, so a test must not drop `a_apa/` into the repository.
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(str(self.root))
+
+    def call(self, argv, **probes):
+        self.calls = []
+        root = self.root
 
         defaults = {
             "skill_script": lambda name: str(root / "scripts" / name),
@@ -503,15 +567,30 @@ class TestForwarding(CheckHarness):
         return code, self.calls, out.getvalue(), err.getvalue()
 
     def test_the_argument_order_survives_intact(self):
+        # The regression guarded here is a REORDER, not an addition: defaults we
+        # compute are appended at the end, but everything the user wrote has to
+        # arrive in the order they wrote it.
         _, calls, _, _ = self.call(
             ["parse", "--md", "a.md", "--out", "b.json", "--base-dir", "img"])
-        self.assertEqual(calls[0][2:],
+        recibidos = calls[0][2:]
+        self.assertEqual(recibidos[:6],
                          ["--md", "a.md", "--out", "b.json", "--base-dir", "img"])
+        # --out was given, so the log is the only thing we added, and it is added
+        # at the end rather than in the middle of what the user wrote.
+        self.assertEqual(
+            recibidos[6:],
+            ["--log", str(self.root / "a_apa" / "logs" / "01-analisis.log")])
+
+    def test_nothing_is_appended_when_nothing_is_missing(self):
+        _, calls, _, _ = self.call(["parse", "--md", "a.md", "--out", "b.json",
+                                    "--log", "c.log"])
+        self.assertEqual(calls[0][2:],
+                         ["--md", "a.md", "--out", "b.json", "--log", "c.log"])
 
     def test_an_option_whose_value_looks_like_a_flag_stays_attached(self):
         _, calls, _, _ = self.call(["verify", "--pdf", "--weird.pdf",
                                     "--manifiesto", "m.json"])
-        self.assertEqual(calls[0][2:],
+        self.assertEqual(calls[0][2:6],
                          ["--pdf", "--weird.pdf", "--manifiesto", "m.json"])
 
     def test_help_reaches_the_target_script(self):
@@ -576,6 +655,173 @@ class TestForwarding(CheckHarness):
             self.assertIn(command, err)
             self.assertNotIn("python scripts/apa7.py", err)
 
+
+class TestRutasPorDefecto(TestForwarding):
+    """What lands where when the caller passes no paths at all.
+
+    This is the change the whole task is about: no more MANIFEST.json, document.docx
+    and three .log files dropped next to the user's .md.
+    """
+
+    def _flags(self, llamada, nombre):
+        partes = llamada
+        for i, parte in enumerate(partes):
+            if parte == nombre:
+                return partes[i + 1]
+        self.fail("%s not present in %s" % (nombre, partes))
+
+    def test_parse_writes_the_manifest_into_the_working_folder(self):
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        _, calls, _, _ = self.call(["parse", "--md", "informe.md"])
+        salida = self._flags(calls[0], "--out")
+        self.assertEqual(Path(salida), self.root / "informe_apa" / "datos" / "MANIFEST.json")
+        log = self._flags(calls[0], "--log")
+        self.assertEqual(Path(log), self.root / "informe_apa" / "logs" / "01-analisis.log")
+
+    def test_parse_records_which_md_the_folder_belongs_to(self):
+        # Without this anchor, build/export/verify are handed a manifest and a
+        # .docx with no idea which document they belong to.
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        self.call(["parse", "--md", "informe.md"])
+        fuente = self.root / "informe_apa" / "datos" / "fuente.json"
+        self.assertTrue(fuente.is_file())
+        self.assertEqual(json.loads(fuente.read_text(encoding="utf-8"))["nombre"], "informe.md")
+
+    def test_the_working_folder_is_the_only_thing_created_next_to_the_md(self):
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        self.call(["parse", "--md", "informe.md"])
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()
+                                if p.name != "scripts"),
+                         ["informe.md", "informe_apa"])
+        self.assertEqual(sorted(p.name for p in
+                                (self.root / "informe_apa").iterdir()),
+                         ["datos", "logs"])
+
+    def test_build_writes_the_docx_next_to_the_md_not_inside_the_folder(self):
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        datos = self.root / "informe_apa" / "datos"
+        datos.mkdir(parents=True)
+        (datos / "MANIFEST.json").write_text("{}", encoding="utf-8")
+        (datos / "fuente.json").write_text(
+            json.dumps({"md": str(self.root / "informe.md"), "nombre": "informe.md"}),
+            encoding="utf-8")
+        _, calls, _, _ = self.call(["build", "--manifiesto",
+                                    str(datos / "MANIFEST.json")])
+        self.assertEqual(Path(self._flags(calls[0], "--out")),
+                         self.root / "informe.docx")
+        self.assertEqual(Path(self._flags(calls[0], "--log")),
+                         self.root / "informe_apa" / "logs" / "02-build.log")
+
+    def test_the_docx_is_never_called_manifest_docx(self):
+        # The regression this catches: naming the deliverable after the artifact
+        # that happened to be passed instead of after the document.
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        datos = self.root / "informe_apa" / "datos"
+        datos.mkdir(parents=True)
+        (datos / "MANIFEST.json").write_text("{}", encoding="utf-8")
+        rutas.anota_fuente(self.root / "informe_apa", self.root / "informe.md")
+        _, calls, _, _ = self.call(["build", "--manifiesto",
+                                    str(datos / "MANIFEST.json")])
+        self.assertEqual(Path(self._flags(calls[0], "--out")).name, "informe.docx")
+
+    def test_verify_gets_a_log_and_a_report_by_default(self):
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        _, calls, _, _ = self.call(["verify", "--pdf", "p.pdf", "--manifiesto", "m.json"])
+        self.assertEqual(Path(self._flags(calls[0], "--log")),
+                         self.root / "p_apa" / "logs" / "04-verificacion.log")
+        self.assertEqual(Path(self._flags(calls[0], "--json")),
+                         self.root / "p_apa" / "datos" / "verificacion.json")
+
+    def test_an_explicit_flag_always_wins(self):
+        # The one rule the whole defaulting scheme rests on.
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        (self.root / "mio.json").write_text("{}", encoding="utf-8")
+        (self.root / "mio.log").write_text("", encoding="utf-8")
+        _, calls, _, _ = self.call(["parse", "--md", "informe.md",
+                                    "--out", "mio.json", "--log", "mio.log"])
+        self.assertEqual(self._flags(calls[0], "--out"), "mio.json")
+        self.assertEqual(self._flags(calls[0], "--log"), "mio.log")
+
+    def test_carpeta_trabajo_moves_everything_and_never_reaches_the_script(self):
+        # The target scripts have never heard of this option; forwarded verbatim
+        # they would abort on an unknown argument instead of reading the document.
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        fuera = self.root / "trabajo"
+        _, calls, _, _ = self.call(["parse", "--md", "informe.md",
+                                    "--carpeta-trabajo", str(fuera)])
+        self.assertNotIn("--carpeta-trabajo", calls[0])
+        self.assertEqual(Path(self._flags(calls[0], "--out")),
+                         fuera / "datos" / "MANIFEST.json")
+
+    def test_carpeta_trabajo_also_works_with_the_equals_form(self):
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        fuera = self.root / "trabajo"
+        _, calls, _, _ = self.call(["parse", "--md", "informe.md",
+                                    "--carpeta-trabajo=%s" % fuera])
+        self.assertNotIn("--carpeta-trabajo=%s" % fuera, calls[0])
+        self.assertEqual(Path(self._flags(calls[0], "--out")),
+                         fuera / "datos" / "MANIFEST.json")
+
+    def test_a_missing_md_is_left_to_the_target_script(self):
+        # No anchor, no defaults, and no traceback out of the dispatcher either.
+        _, calls, out, _ = self.call(["parse", "--base-dir", "img"])
+        self.assertEqual(calls[0][2:], ["--base-dir", "img"])
+        self.assertEqual(out, "")
+
+    def test_rerunning_replaces_the_files_and_adds_nothing(self):
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        self.call(["parse", "--md", "informe.md"])
+        self.call(["parse", "--md", "informe.md"])
+        trabajo = self.root / "informe_apa"
+        self.assertEqual(sorted(p.name for p in trabajo.iterdir()), ["datos", "logs"])
+        # The manifest is written by the target script, which is mocked here; what
+        # the dispatcher itself must not accumulate is the anchor.
+        self.assertEqual(sorted(p.name for p in trabajo.joinpath("datos").iterdir()),
+                         ["fuente.json"])
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()
+                                if p.name != "scripts"),
+                         ["informe.md", "informe_apa"])
+
+    def test_a_warning_about_a_reused_folder_goes_to_stderr(self):
+        # A folder pointed at a second document is a warning, not an error: the
+        # .docx is a function of the .md just passed, and a run with no terminal
+        # cannot ask anything.
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        (self.root / "otro.md").write_text("# y", encoding="utf-8")
+        trabajo = self.root / "trabajo"
+        self.call(["parse", "--md", "informe.md", "--carpeta-trabajo", str(trabajo)])
+        _, _, out, err = self.call(["parse", "--md", "otro.md",
+                                    "--carpeta-trabajo", str(trabajo)])
+        self.assertIn("WARNING", err)
+        self.assertIn("otro.md", err)
+        self.assertEqual(out, "")
+        self.assertEqual(json.loads(
+            (trabajo / "datos" / "fuente.json").read_text(encoding="utf-8"))["nombre"],
+            "otro.md")
+
+    def test_two_documents_get_two_working_folders(self):
+        # The folder is named after the document, so two documents never collide.
+        (self.root / "informe.md").write_text("# x", encoding="utf-8")
+        (self.root / "otro.md").write_text("# y", encoding="utf-8")
+        self.call(["parse", "--md", "informe.md"])
+        _, _, _, err = self.call(["parse", "--md", "otro.md"])
+        self.assertEqual(err, "")
+        self.assertTrue((self.root / "informe_apa").is_dir())
+        self.assertTrue((self.root / "otro_apa").is_dir())
+
+    def test_inyecta_never_overrides_what_the_user_wrote(self):
+        self.assertEqual(apa7._inyecta(["--out", "x"], "--out", "y"), ["--out", "x"])
+        self.assertEqual(apa7._inyecta(["--out=x"], "--out", "y"), ["--out=x"])
+        self.assertEqual(apa7._inyecta(["--a", "1"], "--out", "y"), ["--a", "1", "--out", "y"])
+        self.assertEqual(apa7._inyecta(["--a", "1"], "--out", None), ["--a", "1"])
+
+    def test_extrae_removes_the_option_and_leaves_the_order_intact(self):
+        self.assertEqual(apa7._extrae(["--a", "1", "--carpeta-trabajo", "x", "--b", "2"],
+                                      "--carpeta-trabajo"), ("x", ["--a", "1", "--b", "2"]))
+        self.assertEqual(apa7._extrae(["--carpeta-trabajo=x", "--a"], "--carpeta-trabajo"),
+                         ("x", ["--a"]))
+        self.assertEqual(apa7._extrae(["--a", "1"], "--carpeta-trabajo"), (None, ["--a", "1"]))
+
     def test_a_missing_target_script_is_reported_not_raised(self):
         code, calls, out, err = self.call(["parse", "--md", "a.md"],
                                           skill_script=lambda name: "/nope/" + name)
@@ -622,6 +868,13 @@ class TestNoHardcodedPaths(CheckHarness):
 class TestDoblePasadaDeIndices(unittest.TestCase):
     """The two-pass index build: the second run must carry --paginas-json."""
 
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="apa7_doble_"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+
+    def _documento(self, md="salida"):
+        return rutas.rutas_documento(md=self.tmp / (md + ".md"), crear=True)
+
     def test_valor_de_lee_las_dos_formas_del_flag(self):
         self.assertEqual(apa7._valor_de(["--out", "a.docx"], "--out"), "a.docx")
         self.assertEqual(apa7._valor_de(["--out=a.docx"], "--out"), "a.docx")
@@ -629,6 +882,7 @@ class TestDoblePasadaDeIndices(unittest.TestCase):
 
     def test_manifiesto_con_toc_respeta_toc_campos_false(self):
         tmp = Path(tempfile.mkdtemp(prefix="apa7_toc_"))
+        self.addCleanup(shutil.rmtree, str(tmp), True)
         ruta = tmp / "m.json"
         ruta.write_text(json.dumps({"opciones": {"toc_campos": False}}), encoding="utf-8")
         self.assertIsNone(apa7._manifiesto_con_toc(["--manifiesto", str(ruta)]))
@@ -641,18 +895,19 @@ class TestDoblePasadaDeIndices(unittest.TestCase):
         with mock.patch.object(apa7.subprocess, "call",
                                side_effect=lambda c: llamadas.append(c) or 0):
             codigo = apa7._segunda_pasada_indices("/usr/bin/node", "build.js",
-                                                  ["--manifiesto", "m.json"])
+                                                  ["--manifiesto", "m.json"],
+                                                  self._documento())
         self.assertEqual(codigo, 0)
         self.assertEqual(llamadas, [])
 
-    def test_la_segunda_pasada_rebuilds_con_paginas_json(self):
-        tmp = Path(tempfile.mkdtemp(prefix="apa7_doble_"))
-        docx = tmp / "salida.docx"
+    def _correr(self, codigo_rebuild=0, docx_nombre="salida"):
+        docx = self.tmp / (docx_nombre + ".docx")
         docx.write_text("x", encoding="utf-8")
-        manifest = tmp / "m.json"
+        manifest = self.tmp / "m.json"
         manifest.write_text("{}", encoding="utf-8")
-        (tmp / "paginas-de-pdf.py").write_text("", encoding="utf-8")
+        (self.tmp / "paginas-de-pdf.py").write_text("", encoding="utf-8")
         rest = ["--manifiesto", str(manifest), "--out", str(docx)]
+        documento = rutas.rutas_documento(md=self.tmp / (docx_nombre + ".md"))
         llamadas = []
 
         def fake_call(comando):
@@ -664,6 +919,67 @@ class TestDoblePasadaDeIndices(unittest.TestCase):
             destino.write_text('{"secciones":{},"tablas":{},"figuras":{}}', encoding="utf-8")
             return 0
 
+        exports = []
+
+        def fake_export(ns):
+            exports.append(ns)
+            (Path(ns.outdir) / (Path(ns.docx).stem + ".pdf")).write_bytes(b"%PDF-1.4")
+            return 0
+
+        with mock.patch.object(apa7, "cmd_export", fake_export), \
+             mock.patch.object(rutas, "venv_python", return_value="C:/py"), \
+             mock.patch.object(rutas, "python_works", return_value=True), \
+             mock.patch.object(rutas, "skill_script", side_effect=lambda n: str(self.tmp / n)), \
+             mock.patch.object(apa7.subprocess, "call", fake_call):
+            codigo = apa7._segunda_pasada_indices("/usr/bin/node",
+                                                  str(self.tmp / "build-docx.js"),
+                                                  rest, documento)
+        return codigo, llamadas, exports, documento
+
+    def test_la_segunda_pasada_rebuilds_con_paginas_json(self):
+        codigo, llamadas, _, _ = self._correr()
+        self.assertEqual(codigo, 0)
+        self.assertEqual(len(llamadas), 2)          # measure + rebuild
+        self.assertTrue(llamadas[0][1].endswith("paginas-de-pdf.py"))
+        self.assertTrue(llamadas[1][1].endswith("build-docx.js"))
+        self.assertIn("--paginas-json", llamadas[1])
+
+    def test_los_temporales_van_a_logs_y_no_a_la_carpeta_del_usuario(self):
+        # The old code wrote <docx folder>/_logs/, which meant a _logs/ directory
+        # beside the document the user was trying to tidy up.
+        _, _, exports, documento = self._correr()
+        self.assertEqual(Path(exports[0].outdir), documento.logs)
+        self.assertEqual(Path(exports[0].log), documento.log_paginas)
+        self.assertEqual(documento.paginas_json.parent, documento.logs)
+        self.assertFalse((self.tmp / "_logs").exists())
+        self.assertTrue(documento.paginas_json.is_file())
+
+    def test_el_pdf_desechable_se_borra_al_terminar(self):
+        _, _, _, documento = self._correr()
+        self.assertTrue(str(documento.pdf_auxiliar).startswith(str(documento.logs)))
+        self.assertFalse(documento.pdf_auxiliar.exists(),
+                         "the throwaway PDF was left in logs/")
+        # The evidence of the measured pages is what stays.
+        self.assertTrue(documento.paginas_json.is_file())
+
+    def test_el_pdf_desechable_no_se_borra_si_la_segunda_pasada_falla(self):
+        docx = self.tmp / "salida.docx"
+        docx.write_text("x", encoding="utf-8")
+        manifest = self.tmp / "m.json"
+        manifest.write_text("{}", encoding="utf-8")
+        (self.tmp / "paginas-de-pdf.py").write_text("", encoding="utf-8")
+        documento = rutas.rutas_documento(md=self.tmp / "salida.md")
+        documento.logs.mkdir(parents=True, exist_ok=True)
+        aux = documento.pdf_auxiliar
+        aux.write_bytes(b"%PDF-1.4")
+
+        def fake_call(comando):
+            partes = [str(c) for c in comando]
+            destino = Path(partes[partes.index("--out") + 1])
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            destino.write_text("{}", encoding="utf-8")
+            return 3 if partes[1].endswith("build-docx.js") else 0
+
         def fake_export(ns):
             (Path(ns.outdir) / (Path(ns.docx).stem + ".pdf")).write_bytes(b"%PDF-1.4")
             return 0
@@ -671,16 +987,14 @@ class TestDoblePasadaDeIndices(unittest.TestCase):
         with mock.patch.object(apa7, "cmd_export", fake_export), \
              mock.patch.object(rutas, "venv_python", return_value="C:/py"), \
              mock.patch.object(rutas, "python_works", return_value=True), \
-             mock.patch.object(rutas, "skill_script", side_effect=lambda n: str(tmp / n)), \
+             mock.patch.object(rutas, "skill_script", side_effect=lambda n: str(self.tmp / n)), \
              mock.patch.object(apa7.subprocess, "call", fake_call):
             codigo = apa7._segunda_pasada_indices("/usr/bin/node",
-                                                  str(tmp / "build-docx.js"), rest)
-
-        self.assertEqual(codigo, 0)
-        self.assertEqual(len(llamadas), 2)          # measure + rebuild
-        self.assertTrue(llamadas[0][1].endswith("paginas-de-pdf.py"))
-        self.assertTrue(llamadas[1][1].endswith("build-docx.js"))
-        self.assertIn("--paginas-json", llamadas[1])
+                                                  str(self.tmp / "build-docx.js"),
+                                                  ["--manifiesto", str(manifest),
+                                                   "--out", str(docx)], documento)
+        self.assertEqual(codigo, 3)
+        self.assertTrue(aux.exists(), "the PDF that failed to convert was deleted")
 
 
 class TestCompatibleWithPython39(unittest.TestCase):

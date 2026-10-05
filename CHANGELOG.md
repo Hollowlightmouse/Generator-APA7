@@ -5,6 +5,77 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Output organization: a converted document now lands as a predictable set of
+files next to its `.md`, instead of the mixed pile that three phases each chose
+for themselves.
+
+### Added
+
+- `scripts/lib/rutas.py` owns **where a document's files go**:
+  `rutas_documento()` (the `.md`, `.docx`, `.pdf`, working folder, `datos/`,
+  `logs/` and the default `--out` / `--log` / `--json` / `--outdir` per phase),
+  `sanea_nombre()` for the working-folder name (NFKD without diacritics,
+  invalid and control characters and spaces to `_`, Windows reserved names with
+  a `_` suffix, capped at 60 characters), and `anota_fuente()` for the
+  `datos/fuente.json` anchor that lets a phase resolve its document without
+  being told again.
+- `--carpeta-trabajo <dir>` on `parse`, `build`, `export` and `verify`, for the
+  documents that must keep their intermediates somewhere other than next to
+  them.
+- Warning on stderr when a working folder that already holds an anchor is
+  pointed at a different `.md`.
+- `export` without `--docx` resolves the document from the working folder, and
+  says so instead of guessing when the folder holds more than one `.docx`.
+
+### Changed
+
+- **Defaults, not requirements.** Each phase now derives its own paths, so
+  `--out`, `--log`, `--outdir` and `--json` became optional. The deliverables
+  keep the original name of the `.md`: `informe.md` → `informe.docx`,
+  `informe.pdf` and `informe_apa/`.
+- The working folder is **reused, never versioned**: a rerun replaces the files
+  in place instead of leaving `informe (2).docx` behind.
+- **Explicit flags still win.** `export --outdir X` without
+  `--carpeta-trabajo` keeps its historical meaning, PDF *and*
+  `X/_logs/03-export.log`, so existing callers are unaffected; that is the only
+  case that still writes `_logs/`.
+- The double pass keeps its temporaries in `logs/` instead of the folder of the
+  first-pass `.docx`, `paginas-de-pdf.py` is invoked without `--out` so the page
+  map lands in `datos/`'s sibling `logs/paginas.json`, and the throwaway PDF is
+  **deleted once the second pass succeeds**. It is kept when the second pass
+  fails, because it is then the only record of what was measured.
+- A failed `verify` keeps its PDF and its whole working folder, as the failure
+  report intends.
+- Documentation: an "Output layout" section in `SKILL.md`, a "Where the files
+  land" section in `README.md`, and the per-phase path table in
+  `references/system-requirements.md`.
+- `.gitignore` ignores `*_apa/` so a conversion run inside the repository cannot
+  be committed by accident.
+
+### Fixed
+
+- **A false critical failure on every table wider than a page.** "Tables carry a
+  note below" only looked for the note on the page holding the `Tabla N` label,
+  but a table that fills a page ends on the next one and its note follows it
+  there. The check now searches from the label up to the next table's label, so
+  the note is accepted wherever the table ends while still belonging to it, and
+  an in-text cross-reference (`... se observa en la Tabla 6 ...`) is no longer
+  mistaken for a caption.
+- The build log is `logs/02-build.log`, the name the documentation had been
+  promising since 1.0.0; the code wrote `02-docx.log`.
+- `export` without `--docx` now works at all: the fallback was documented but
+  the argument was still required, so it could not be reached.
+
+### Note on the acceptance criterion
+
+The original criterion for this change was "only the PDF and the working folder
+appear next to the `.md`". That was **amended by decision**: the `.docx` is a
+deliverable in its own right and is not hidden inside the working folder, so
+next to `informe.md` there are now `informe.docx`, `informe.pdf` and
+`informe_apa/` — and nothing else.
+
 ## [1.0.0] - 2026-10-03
 
 First release of the `generate-apa-document` skill. There is no earlier tag, so

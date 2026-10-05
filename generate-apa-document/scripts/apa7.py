@@ -228,12 +228,44 @@ def cmd_check(_args):
 # ---------------------------------------------------------------------------
 # export
 # ---------------------------------------------------------------------------
+def _docx_a_exportar(docx, carpeta):
+    """`(path, note, error)` for the .docx to export.
+
+    An explicit `--docx` always wins. Without it the document is looked for in
+    the working folder (`--carpeta-trabajo`) or, failing that, in the current
+    folder: exactly one `.docx` is used, and zero or several are an ERROR
+    rather than a guess, because picking one of two documents would convert the
+    wrong one and report success doing it.
+    """
+    if docx:
+        return Path(docx).expanduser(), "", None
+
+    base = Path(carpeta).expanduser() if carpeta else Path.cwd()
+    encontrados = sorted(p for p in base.glob("*.docx") if p.is_file())
+    if len(encontrados) == 1:
+        return (encontrados[0],
+                "No --docx given; using the only .docx of the folder: %s"
+                % encontrados[0].resolve(),
+                None)
+    if not encontrados:
+        return None, "", ("No .docx in %s. Pass --docx FILE.docx."
+                          % base.resolve())
+    return None, "", ("%d .docx files in %s, so which one to export is ambiguous: "
+                      "%s. Pass --docx FILE.docx."
+                      % (len(encontrados), base.resolve(),
+                         ", ".join(p.name for p in encontrados)))
+
+
 def cmd_export(args):
     """.docx -> .pdf with headless LibreOffice (the single engine).
 
     Progress goes to stderr and the resulting PDF path goes to stdout, so the
     caller can use it without having to parse a log. Both are also written to
     the log file.
+
+    `--docx` may be omitted: the only `.docx` of the working folder (or of the
+    current folder) is then exported, and zero or several are reported as
+    ambiguous instead of being guessed.
 
     Three details that are not optional:
 
@@ -261,7 +293,13 @@ def cmd_export(args):
     log_file = None
 
     try:
-        docx = Path(args.docx).expanduser()
+        docx, nota, error = _docx_a_exportar(
+            args.docx, getattr(args, "carpeta_trabajo", None))
+        if error:
+            step(error, "FAIL")
+            return 1
+        if nota:
+            step(nota, "INFO")
         if not docx.is_file():
             step("The .docx does not exist: %s" % docx, "FAIL")
             return 1
@@ -271,7 +309,16 @@ def cmd_export(args):
         out_dir.mkdir(parents=True, exist_ok=True)
         out_dir = out_dir.resolve()
 
-        log_dir = out_dir / "_logs"
+        # An explicit --outdir has always meant "PDF and logs go here", and that
+        # is what every existing caller expects, so it keeps its `_logs/`.
+        # Without one, the logs belong to the document's own working folder, and
+        # a `_logs/` next to the user's document is exactly the clutter this
+        # change exists to remove.
+        carpeta = getattr(args, "carpeta_trabajo", None)
+        if args.outdir and not carpeta:
+            log_dir = out_dir / "_logs"
+        else:
+            log_dir = rutas.rutas_documento(salida=docx, carpeta_trabajo=carpeta).logs
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = Path(args.log).expanduser() if args.log else log_dir / "03-export.log"
 
@@ -762,10 +809,38 @@ def cmd_parse(args):
     """Markdown -> MANIFEST.json.
 
     Needs no third-party package, so the current interpreter is enough.
+
+    `--out` is MANDATORY in md-a-manifiesto.py, so the default is computed here
+    and passed explicitly instead of relaxing that script: its own contract is
+    left alone, and a caller who gave `--out` still gets exactly what they asked
+    for.
     """
-    return _forward(_forwarded(args), sys.executable,
+    rest = _forwarded(args)
+    carpeta, rest = _extrae(rest, "--carpeta-trabajo")
+    md = _valor_de(rest, "--md")
+    # crear=True: the documented layout is datos/ AND logs/, and it should be
+    # there from the first run instead of appearing later, one folder at a time.
+    documento = _rutas_de({"md": md}, carpeta, crear=True)
+    if documento is None:
+        return _forward(rest, sys.executable,
+                        rutas.skill_script("md-a-manifiesto.py"), "parse",
+                        "parse --md FILE.md [--out MANIFEST.json] [options]")
+
+    if md:
+        aviso = rutas.anota_fuente(documento.trabajo, md)
+        if aviso:
+            sys.stderr.write(aviso + "\n")
+
+    rest = _inyecta(rest, "--out", documento.manifiesto)
+    rest = _inyecta(rest, "--log", documento.log_parse)
+    # Only when it is really there: md-a-manifiesto.py ignores a portada that
+    # does not exist, and naming a file that is not there helps nobody.
+    if documento.portada.is_file():
+        rest = _inyecta(rest, "--portada", documento.portada)
+
+    return _forward(rest, sys.executable,
                     rutas.skill_script("md-a-manifiesto.py"), "parse",
-                    "parse --md FILE.md --out MANIFEST.json [options]")
+                    "parse --md FILE.md [--out MANIFEST.json] [options]")
 
 
 def _valor_de(rest, nombre):
@@ -776,6 +851,55 @@ def _valor_de(rest, nombre):
         if argumento.startswith(nombre + "="):
             return argumento.split("=", 1)[1]
     return None
+
+
+def _extrae(rest, nombre):
+    """(value of `--nombre`, the rest of the list). The option is REMOVED.
+
+    Needed for the options the dispatcher owns and the target scripts do not
+    know: forwarded verbatim, `md-a-manifiesto.py` would fail on an argument it
+    has never heard of instead of reading the document.
+    """
+    valor = None
+    resto = []
+    elementos = list(rest)
+    i = 0
+    while i < len(elementos):
+        argumento = elementos[i]
+        if argumento == nombre and i + 1 < len(elementos):
+            valor = elementos[i + 1]
+            i += 2
+            continue
+        if argumento.startswith(nombre + "="):
+            valor = argumento.split("=", 1)[1]
+            i += 1
+            continue
+        resto.append(argumento)
+        i += 1
+    return valor, resto
+
+
+def _inyecta(rest, nombre, valor):
+    """Append `--nombre valor` unless the caller already passed the option.
+
+    Precedence, everywhere in this dispatcher: what the user wrote wins. The
+    default is only ever what the user did NOT ask for.
+    """
+    if valor is None or _valor_de(rest, nombre) is not None:
+        return list(rest)
+    return list(rest) + [nombre, str(valor)]
+
+
+def _rutas_de(anclas, carpeta=None, **opciones):
+    """rutas_documento() for a subcommand, or None when nothing is given.
+
+    None means "let the target script complain": `parse` with no --md has to stay
+    the target script's clear error about the missing .md, not a ValueError with
+    a traceback coming out of the dispatcher.
+    """
+    if not carpeta and not any(anclas.values()):
+        return None
+    return rutas.rutas_documento(carpeta_trabajo=carpeta, **opciones, **anclas)
 
 
 def _manifiesto_con_toc(rest):
@@ -797,7 +921,7 @@ def _manifiesto_con_toc(rest):
     return manifiesto
 
 
-def _segunda_pasada_indices(node, build_js, rest):
+def _segunda_pasada_indices(node, build_js, rest, documento):
     """Fill the indexes' page numbers by exporting once and rebuilding.
 
     A TOC field's result is computed by the rendering engine, never by
@@ -805,6 +929,14 @@ def _segunda_pasada_indices(node, build_js, rest):
     sequence is: export the first .docx to a throwaway PDF, read the page of
     every entry with paginas-de-pdf.py, and rebuild the .docx passing that map
     with --paginas-json. Its numbers become the fields' cached result.
+
+    Everything temporary goes into the document's logs/ folder, never into the
+    folder the user sees: the throwaway PDF and paginas.json used to be written
+    to `<docx folder>/_logs/`, which meant a `_logs/` directory beside the
+    document the user was trying to tidy up. paginas.json is KEPT, because it is
+    the evidence that explains an index with wrong pages; the throwaway PDF is
+    deleted once the run succeeds, and kept when it does not, since a PDF that
+    could not be converted is exactly what one needs to look at.
 
     Any missing piece (no venv, no LibreOffice, an unreadable PDF) leaves the
     first .docx as the final one: the indexes then ship without numbers and Word
@@ -820,20 +952,21 @@ def _segunda_pasada_indices(node, build_js, rest):
     if not (interpreter and rutas.python_works(interpreter)):
         return 0
 
-    trabajo = Path(docx).resolve().parent / "_logs"
-    trabajo.mkdir(parents=True, exist_ok=True)
-    mapa = trabajo / "paginas.json"
+    logs = documento.logs
+    logs.mkdir(parents=True, exist_ok=True)
+    mapa = documento.paginas_json
 
     # Pass 1: export with the fields unresolved. cmd_export is reused so there is
     # one LibreOffice code path, not two. Its stdout (the PDF path) is swallowed:
     # build's own contract must not gain stray lines.
     with contextlib.redirect_stdout(io.StringIO()):
         codigo = cmd_export(argparse.Namespace(
-            docx=str(docx), outdir=str(trabajo),
-            log=str(trabajo / "04-paginas.log"), timeout=300))
+            docx=str(docx), outdir=str(logs),
+            log=str(documento.log_paginas), timeout=300,
+            carpeta_trabajo=str(documento.trabajo)))
     if codigo != 0:
         return 0
-    pdf = trabajo / (Path(docx).stem + ".pdf")
+    pdf = documento.pdf_auxiliar
     if not pdf.is_file():
         return 0
 
@@ -848,8 +981,15 @@ def _segunda_pasada_indices(node, build_js, rest):
         return 0
 
     # Pass 2: rebuild with the measured pages cached inside the TOC fields.
-    return subprocess.call([str(node), str(build_js)] + list(rest)
-                           + ["--paginas-json", str(mapa)])
+    codigo = subprocess.call([str(node), str(build_js)] + list(rest)
+                             + ["--paginas-json", str(mapa)])
+
+    if codigo == 0:
+        try:
+            pdf.unlink()
+        except OSError:
+            pass
+    return codigo
 
 
 def cmd_build(args):
@@ -868,12 +1008,32 @@ def cmd_build(args):
                          % rutas.comando_apa7("install", "--only", "node"))
         return 1
     rest = _forwarded(args)
+    carpeta, rest = _extrae(rest, "--carpeta-trabajo")
+    manifiesto = _valor_de(rest, "--manifiesto")
+    destino = _valor_de(rest, "--out")
+
+    documento = _rutas_de({"salida": destino, "manifiesto": manifiesto}, carpeta)
+    if documento is None:
+        return _forward(rest, node, rutas.skill_script("build-docx.js"), "build",
+                        "build --manifiesto MANIFEST.json [--out salida.docx] [--log log.txt]")
+
+    # Two passes over rutas_documento, and both are needed. The first only knows
+    # the manifest, which is enough to find the working folder but not to name
+    # the deliverable; the second runs with the .docx path settled so the name of
+    # the document is the one the user gave, never "MANIFEST".
+    if _valor_de(rest, "--out") is None:
+        rest = _inyecta(rest, "--out", documento.docx)
+    documento = rutas.rutas_documento(salida=destino or documento.docx,
+                                      manifiesto=manifiesto,
+                                      carpeta_trabajo=carpeta)
+    rest = _inyecta(rest, "--log", documento.log_build)
+
     build_js = rutas.skill_script("build-docx.js")
     codigo = _forward(rest, node, build_js, "build",
-                      "build --manifiesto MANIFEST.json --out salida.docx [--log log.txt]")
+                      "build --manifiesto MANIFEST.json [--out salida.docx] [--log log.txt]")
     if codigo != 0 or _manifiesto_con_toc(rest) is None:
         return codigo
-    return _segunda_pasada_indices(node, build_js, rest)
+    return _segunda_pasada_indices(node, build_js, rest, documento)
 
 
 def cmd_verify(args):
@@ -883,6 +1043,10 @@ def cmd_verify(args):
     installed into the skill's .venv, so a system Python without it either
     fails to import or, worse, imports a different version. The venv interpreter
     is selected here so `verify` behaves the same however it is invoked.
+
+    The report goes to the document's datos/ folder by default. It used to have
+    no default at all, which is why a failed verification often left nothing
+    behind to explain it.
     """
     interpreter = rutas.venv_python()
     if not (interpreter and rutas.python_works(interpreter)):
@@ -892,7 +1056,16 @@ def cmd_verify(args):
             % (rutas.skill_root() / ".venv", sys.executable,
                rutas.comando_apa7("install", "--only", "pymupdf")))
         interpreter = sys.executable
-    return _forward(_forwarded(args), interpreter,
+
+    rest = _forwarded(args)
+    carpeta, rest = _extrae(rest, "--carpeta-trabajo")
+    documento = _rutas_de({"salida": _valor_de(rest, "--pdf"),
+                           "manifiesto": _valor_de(rest, "--manifiesto")}, carpeta)
+    if documento is not None:
+        rest = _inyecta(rest, "--log", documento.log_verify)
+        rest = _inyecta(rest, "--json", documento.json_verificacion)
+
+    return _forward(rest, interpreter,
                     rutas.skill_script("verificar-pdf.py"), "verify",
                     "verify --pdf salida.pdf --manifiesto MANIFEST.json [options]")
 
@@ -947,11 +1120,18 @@ def main(argv=None):
 
     export_parser = subparsers.add_parser(
         "export", help=".docx -> .pdf with headless LibreOffice")
-    export_parser.add_argument("--docx", required=True, help="input .docx (required)")
+    export_parser.add_argument(
+        "--docx", default=None,
+        help="input .docx (default: the only .docx of the working folder)")
     export_parser.add_argument("--outdir", default=None,
                                help="output folder (default: the .docx folder)")
     export_parser.add_argument("--log", default=None,
-                               help="log file (default: <outdir>/_logs/03-export.log)")
+                               help="log file (default: <work folder>/logs/03-export.log, "
+                                    "or <outdir>/_logs/03-export.log when --outdir is given)")
+    export_parser.add_argument(
+        "--carpeta-trabajo", dest="carpeta_trabajo", default=None, metavar="DIR",
+        help="folder that holds this document's datos/ and logs/. Defaults to "
+             "<name>_apa/ next to the .docx.")
     export_parser.add_argument("--timeout", type=int, default=300,
                                help="maximum wait in seconds (default: 300)")
     export_parser.add_argument(
@@ -979,14 +1159,17 @@ def main(argv=None):
     # Registered only so that `apa7.py --help` lists them; the branch above
     # handles them before argparse ever sees them.
     subparsers.add_parser(
-        "parse", help="PHASE 1: .md -> MANIFEST.json (options are forwarded)",
+        "parse", help="PHASE 1: .md -> MANIFEST.json (options are forwarded, "
+                      "plus --carpeta-trabajo)",
         add_help=False)
     subparsers.add_parser(
-        "build", help="PHASE 2: MANIFEST.json -> .docx (options are forwarded)",
+        "build", help="PHASE 2: MANIFEST.json -> .docx (options are forwarded, "
+                      "plus --carpeta-trabajo)",
         add_help=False)
     subparsers.add_parser(
-        "verify", help="PHASE 4: check the PDF against the manifest "
-                       "(options are forwarded)", add_help=False)
+        "verify", help="PHASE 4: check the PDF against the manifest (options are "
+                       "forwarded, plus --carpeta-trabajo)",
+        add_help=False)
 
     args = parser.parse_args(argv)
     return _run(args.handler, args)

@@ -720,7 +720,13 @@ def verificar(args):
     palabras_por_pagina = {i: palabras_de_pagina(doc, i) for i in range(doc.page_count)}
 
     def buscar_etiqueta_tabla(n, desde_pagina, hasta_pagina):
-        """(page, y_top) of the word 'Tabla' followed by the number n."""
+        """(page, y_top) of the word 'Tabla' followed by the number n.
+
+        APA prints the label on a line of its own ("Tabla 2") with the title
+        underneath, so a line is only accepted when nothing else shares it: an
+        in-text cross-reference ("... se observa en la Tabla 6 ...") is on the
+        same line as the sentence and must not be taken for the caption.
+        """
         for i in range(desde_pagina, hasta_pagina):
             if i in paginas_indice:
                 continue
@@ -729,16 +735,25 @@ def verificar(args):
                 if norm(w[4]) != "tabla" or k + 1 >= len(ws):
                     continue
                 sig = ws[k + 1][4].strip().strip(".")
-                if sig == str(n) and abs(ws[k + 1][1] - w[1]) < 4:
-                    return i, w[1]
+                if sig != str(n) or abs(ws[k + 1][1] - w[1]) >= 4:
+                    continue
+                misma_linea = [x[4] for x in ws if abs(x[1] - w[1]) < 3]
+                if len(misma_linea) > 2:
+                    continue
+                return i, w[1]
         return None, None
 
-    def buscar_nota(ws, y_desde, nota):
-        """(word, tail) of the 'Nota.' token below y_desde whose tail matches."""
+    def buscar_nota(ws, y_desde, nota, y_hasta=None):
+        """(word, tail) of the 'Nota.' token below y_desde whose tail matches.
+
+        y_hasta, when given, stops the search: a note found below the next
+        table's label belongs to that next table, not to this one.
+        """
         needle = norm(nota).split()[:6]
         if not needle:
             return None, None
-        cand = [w for w in ws if w[1] >= y_desde - 1]
+        cand = [w for w in ws if w[1] >= y_desde - 1
+                and (y_hasta is None or w[1] <= y_hasta + 1)]
         cand.sort(key=lambda w: (round(w[1], 1), w[0]))
         for k, w in enumerate(cand):
             if norm(w[4]) == "nota":
@@ -747,31 +762,65 @@ def verificar(args):
                     return w, cola
         return None, None
 
+    # A table that fills a page and continues onto the next one carries its note
+    # to the page where it ENDS, not to the page with its label. The note is
+    # therefore looked for from the label up to the next table's label: the
+    # region the table owns. Searching only the label's page reported a false
+    # critical failure for every table wider than one page.
     sin_nota = []
     sin_nota_en_pdf = []
+    notas_continuadas = []
+
+    # First pass: where each label is, in manifest order.
     pagina_cursor = 0
+    etiquetas = []
     for t in Mobj.get("tablas", []):
+        pag, y_lab = buscar_etiqueta_tabla(t["indice"], pagina_cursor, doc.page_count)
+        etiquetas.append((pag, y_lab))
+        if pag is not None:
+            pagina_cursor = pag
+
+    for pos, (t, (pag, y_lab)) in enumerate(zip(Mobj.get("tablas", []), etiquetas)):
         etiqueta = "Tabla %d" % t["indice"]
         nota = t.get("nota")
         if not nota:
             sin_nota.append("%s: the manifest declares no note" % etiqueta)
             continue
-        pag, y_lab = buscar_etiqueta_tabla(t["indice"], pagina_cursor, doc.page_count)
         if pag is None:
-            sin_nota_en_pdf.append("%s: the label was not found from page %d"
+            sin_nota_en_pdf.append("%s: the label was not found after page %d"
                                    % (etiqueta, pagina_cursor + 1))
             continue
-        w_nota, cola = buscar_nota(palabras_por_pagina[pag], y_lab, nota)
-        if w_nota is None:
+        # The table owns everything from its label up to the next table's label.
+        # The next label's own page is included because a table that ends near
+        # the top of a page leaves its note there, above the next caption.
+        limite, y_corte = doc.page_count - 1, None
+        for siguiente, y_siguiente in etiquetas[pos + 1:]:
+            if siguiente is not None:
+                limite, y_corte = siguiente, y_siguiente
+                break
+        encontrada = None
+        for p in range(pag, limite + 1):
+            w_nota, cola = buscar_nota(palabras_por_pagina[p],
+                                       y_lab if p == pag else -1, nota,
+                                       y_corte if p == limite else None)
+            if w_nota is not None:
+                encontrada = p
+                break
+        if encontrada is None:
             sin_nota_en_pdf.append(
                 "%s: no note below the label (page %d, label y=%.0f pt, note='%s')"
                 % (etiqueta, pag + 1, y_lab, nota[:40]))
-        else:
-            # Keep the evidence: where the note was found, to the point.
-            pagina_cursor = pag
+        elif encontrada > pag:
+            notas_continuadas.append(
+                "Tabla %d: note on page %d (the table continues from page %d)"
+                % (t["indice"], encontrada + 1, pag + 1))
+
+    detalle_notas = sin_nota + sin_nota_en_pdf
+    if not detalle_notas:
+        detalle_notas = notas_continuadas
     R.anota("Tables carry a note below (in the PDF, not only in the manifest)",
             not (sin_nota or sin_nota_en_pdf),
-            "; ".join(sin_nota + sin_nota_en_pdf) if (sin_nota or sin_nota_en_pdf)
+            "; ".join(detalle_notas) if detalle_notas
             else "%d table(s) with note verified below the label" % len(Mobj.get("tablas", [])))
 
     # Figures are checked geometrically further down (note above the image).

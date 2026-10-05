@@ -146,6 +146,47 @@ An `APA7_SKILL_ROOT` that does not contain `SKILL.md` is **warned about and
 ignored**: pointing the scripts at an unrelated directory produces a confusing
 cascade of missing files, and the warning points at the cause.
 
+### Where a document's own files go
+
+Tools are resolved relative to the skill; a **document's** files are resolved
+relative to that document. `scripts/lib/rutas.py` owns this and is the only
+place that decides it, so no caller has to invent a path:
+
+| What | Where it lands by default |
+|---|---|
+| `parse` manifest (`--out`) | `<md>_apa/datos/MANIFEST.json` |
+| `parse` log (`--log`) | `<md>_apa/logs/01-analisis.log` |
+| `build` output (`--out`) | next to the `.md`, with the same name |
+| `build` log (`--log`) | `<md>_apa/logs/02-build.log` |
+| double-pass page map | `<md>_apa/logs/paginas.json` |
+| double-pass throwaway PDF | `<md>_apa/logs/`, deleted once pass 2 succeeds |
+| `export` PDF (`--outdir`) | next to the `.docx`, with the same name |
+| `export` log (`--log`) | `<md>_apa/logs/03-export.log` |
+| `verify` report (`--json`) | `<md>_apa/datos/verificacion.json` |
+
+`paginas-de-pdf.py` is called **without** `--out`, so it writes `paginas.json`
+into its working folder rather than into the folder the first `.docx` passed to
+it; the first pass uses a temporary copy precisely so it has no folder of its own
+to write into.
+
+The `<stem>_apa` name is derived from the `.md`: NFKD without diacritics,
+invalid/control characters and spaces become `_`, Windows reserved names get a
+`_` suffix, capped at 60 characters. `Informe técnico.md` becomes
+`Informe_tecnico_apa/`. The `.docx` and the `.pdf` keep their original name.
+
+A phase that is handed no document at all (`export` without `--docx`) looks for
+a single `.docx` in the **current folder** — the one that holds the `.md` and the
+`.docx`, not the working folder — and refuses to choose between zero or several.
+`datos/fuente.json` records which `.md` a folder belongs to, so a later phase can
+resolve the document without being told again; pointing a folder that already has
+an anchor at a different `.md` warns and updates it.
+
+`--carpeta-trabajo <dir>` overrides the working folder for `parse`, `build`,
+`export` and `verify`, and is the only way to put the logs somewhere other than
+next to the document. **Explicit flags win**: an `--outdir` on `export` keeps its
+historical behaviour (PDF *and* `<outdir>/_logs/03-export.log`), which is what
+existing callers depend on.
+
 Example: if the `docx` library is somewhere else because the project already
 had its own dependencies,
 

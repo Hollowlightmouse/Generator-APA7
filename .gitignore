@@ -32,12 +32,19 @@ terms-whitelist.txt
 # Fixtures, salidas .docx/.pdf y logs de cada corrida
 .pruebas/
 evaluacion/
+# Documento real de trabajo (con datos personales: docente, institucion, NRC).
+# Es material local de pruebas, nunca fuente del repositorio.
+Prueba/
 
 # --- Estado de corrida del pipeline ----------------------------------------
 _logs/
 *.log
 __pycache__/
 *.py[cod]
+
+# Carpeta de trabajo de un documento: <nombre>_apa/ con datos/ y logs/. Vive
+# junto al .md que se esta convirtiendo, nunca dentro de la skill.
+*_apa/
 
 # --- Salidas generadas por la skill -----------------------------------------
 *.docx

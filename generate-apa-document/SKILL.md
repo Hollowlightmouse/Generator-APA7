@@ -158,6 +158,51 @@ never done is deciding it for the user.
 The **source** of tables and figures has a resolved default: `Nota. Elaboración
 propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 
+## Output layout
+
+By default every phase derives its own paths from the document it is handed, so
+**you no longer pass `--out`, `--log`, `--outdir` or `--json`** unless you
+deliberately want a different location. Everything lands like this, next to the
+source `.md`:
+
+```
+<carpeta del .md>/
+  informe.md                 ← your source, untouched
+  informe.docx               ← deliverable, same name as the .md
+  informe.pdf                ← deliverable, same name as the .md
+  informe_apa/               ← working folder, name derived and sanitized
+    datos/
+      fuente.json            ← which .md this folder belongs to
+      MANIFEST.json          ← the manifest
+      verificacion.json      ← verification report
+    logs/
+      01-analisis.log        ← parse
+      02-build.log           ← build
+      paginas.json           ← measured page numbers (double pass)
+      03-export.log          ← export
+```
+
+- The `.docx` and the `.pdf` keep the **original** name of the `.md`. Only the
+  working folder is renamed: `NFKD` without diacritics, invalid/control
+  characters and spaces become `_`, Windows reserved names get a `_` suffix, and
+  it is capped at 60 characters. `Informe técnico.md` → `Informe_tecnico_apa/`.
+- **The folder is reused, never versioned.** A second run replaces the files in
+  place and adds nothing; rerunning the pipeline on the same `.md` must not
+  leave `informe (2).docx` behind. If a folder that already holds an anchor is
+  pointed at a *different* `.md`, a warning goes to stderr and the anchor is
+  updated.
+- **The throwaway PDF of the double pass is deleted** once the second pass
+  succeeds, so `logs/` keeps only `paginas.json`. If the second pass fails, that
+  PDF **stays** — it is the only record of what was measured. Either way, a
+  failed `verify` keeps its PDF and its whole working folder.
+- `--carpeta-trabajo <dir>` overrides the working folder for `parse`, `build`,
+  `export` and `verify` when the document must live somewhere else.
+- **Explicit flags always win.** Passing `--log`, `--outdir`, `--out` or `--json`
+  suppresses the corresponding default, so any script or caller that already
+  passes them keeps working exactly as before. `export --outdir X` without
+  `--carpeta-trabajo` keeps its historical meaning, PDF *and* log in `X`
+  (`X/_logs/03-export.log`), which is the only case that still writes `_logs/`.
+
 ## Workflow
 
 1. **Read the `.md`** and extract: title, authors, course data, sections with their real heading level, tables, figures and references. Make an **explicit inventory of tables and figures** (how many, with which titles and sources). While reading, **fix glued words** (PDF-conversion artifacts: `2:Diferenciaciónentre Bugs`, `ACTIVIDAD1:MapeodeControles`). The full rule and the exceptions file are in `references/apa7-format.md`.
@@ -165,10 +210,10 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 2. **Build `MANIFEST.json`** by running the parser on the `.md` (add the layout JSON with `--docling-json`, or let it auto-detect a neighbouring `*_content_list.json`):
 
    ```bash
-   python scripts/apa7.py parse --md "<document>.md" --out "MANIFEST.json" [--log "<log>"] [--portada "portada.json"] ...
+   python scripts/apa7.py parse --md "<document>.md" [--portada "portada.json"] [--carpeta-trabajo "<dir>"] ...
    ```
 
-   `parse` forwards every option to `scripts/md-a-manifiesto.py`, so `python scripts/apa7.py parse --help` lists the full set.
+   `parse` forwards every option to `scripts/md-a-manifiesto.py`, so `python scripts/apa7.py parse --help` lists the full set. With no `--out` the manifest goes to `<md>_apa/datos/MANIFEST.json`, with no `--log` to `<md>_apa/logs/01-analisis.log`.
 
    The parser fixes glued words, deduplicates numbering, **computes each image's size from the `bbox` of the layout JSON** (`--docling-json`, or the auto-detected `*_content_list.json`; `*_content_list_v2.json` as an alternative; `*_model.json` has no image path and only serves as a proportion fallback), applies the default table/figure note, and leaves the blocking questions in `diagnostico`. **Do not estimate sizes by eye.** If a figure already declared in the `.md` also appears in the JSON, it is matched by file name and measured, never duplicated. Read `analisis.log` / the console report: it prints the inventory, the cover fields that are missing, the index policy and the pending questions.
 
@@ -176,11 +221,11 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 
 4. **Table and figure attribution**: if the `.md` does not indicate a different source, the parser sets `Nota. Elaboración propia` automatically (marked with `nota_origen: "default"`). That is already resolved, it is not asked. To change or refine the source of a specific one, pass `--notas-tabla-json` / `--notas-figura-json` with `{"indice": "text"}`.
 
-5. **Build the `.docx`** with `python scripts/apa7.py build --manifiesto "MANIFEST.json" --out "document.docx"` (it runs `scripts/build-docx.js` with the resolved Node, the `docx` library from `.work` and the layout JSON from the manifest). Formatting rules are in `references/apa7-format.md`; instructions for functional indices are in `references/word-toc-fields.md`. Critical points already resolved:
+5. **Build the `.docx`** with `python scripts/apa7.py build --manifiesto "MANIFEST.json"` (it runs `scripts/build-docx.js` with the resolved Node, the `docx` library from `.work` and the layout JSON from the manifest). With no `--out` the `.docx` is written next to the source `.md` with the same name, and with no `--log` the build log goes to `<md>_apa/logs/02-build.log`. Formatting rules are in `references/apa7-format.md`; instructions for functional indices are in `references/word-toc-fields.md`. Critical points already resolved:
    - The TOC is generated **always**; the list of tables and the list of figures **only if the document has them**. If it does not, **ask** to confirm and do **not** generate the empty list.
    - Tables with `width` + `columnWidths` + `layout: FIXED`: LibreOffice does not render tables without defined column widths.
    - Captions with a **real `SEQ` field** (`SEQ Tabla` / `SEQ Figura`), which LibreOffice **does** resolve, because `TOC \c "Tabla"` only collects captions that carry that SEQ. Headings carry an applied `outlineLevel` for `TOC \u`.
-   - **Two-pass build.** `build` runs node once, then (if the manifest asks for TOC fields and LibreOffice is available) exports to a throwaway PDF, measures it with `paginas-de-pdf.py`, and runs node a second time with `--paginas-json`. Both passes are inside the one `build` command. If the venv or LibreOffice is missing, the first `.docx` is kept and Word fills the numbers in on open (<code>updateFields</code>) — a degradation, not a failure. Needs LibreOffice (already mandatory in STEP 0).
+   - **Two-pass build.** `build` runs node once, then (if the manifest asks for TOC fields and LibreOffice is available) exports to a throwaway PDF in `<md>_apa/logs/`, measures it with `paginas-de-pdf.py` into `paginas.json`, and runs node a second time with `--paginas-json`. Both passes are inside the one `build` command, and the throwaway PDF is deleted once the second pass succeeds. If the venv or LibreOffice is missing, the first `.docx` is kept and Word fills the numbers in on open (<code>updateFields</code>) — a degradation, not a failure. Needs LibreOffice (already mandatory in STEP 0).
    - **Aborts with code 4 if a title or caption is missing.** There is no `(sin título)`: it is a defect, not a text.
    - **Figure note BEFORE the image** and with `keepNext`, so the note is not orphaned on the previous page. **Table note AFTER the table**.
    - **Tables with HORIZONTAL borders only**: top border, a line under the header row and bottom border. No verticals and no lines between data rows.
@@ -190,14 +235,14 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 6. **Export to PDF with LibreOffice**:
 
    ```bash
-   python scripts/apa7.py export --docx "<path>/document.docx" [--outdir "<folder>/deliverable"]
+   python scripts/apa7.py export --docx "<path>/document.docx" [--carpeta-trabajo "<dir>"]
    ```
 
-   It prints **only** the resulting PDF path on stdout and puts the log in `<outdir>/_logs/03-export.log`, so the path can be captured directly. Progress and warnings go to stderr. It works on a temporary copy with an **isolated LibreOffice profile** per run, which is deleted at the end; because of that isolation a LibreOffice the user has open is **not** a problem and is left alone. Only the skill's **own** leftovers (the isolated `lo_profile` runs) are closed. `--cerrar-libreoffice` closes **every** LibreOffice process first and warns that unsaved documents are lost. The `Could not find platform independent libraries <prefix>` warning on stderr is benign. Do **not** launch `soffice` through a shell background operator or `Start-Process`: the child inherits the pipe handle and the reader hangs (see `references/word-toc-fields.md`).
+   It prints **only** the resulting PDF path on stdout and puts the log in the working folder (`<stem>_apa/logs/03-export.log`), so the path can be captured directly. Progress and warnings go to stderr. The PDF goes **next to the `.docx`**, with the same name. With no `--docx` at all, `export` looks in the **current folder** (the one that holds the `.md` and the `.docx`, *not* the working folder) and takes its single `.docx`; with zero or two or more it says so instead of guessing. With `--outdir` and no `--carpeta-trabajo` the old behaviour is kept verbatim (PDF in `--outdir`, log in `--outdir/_logs/`). It works on a temporary copy with an **isolated LibreOffice profile** per run, which is deleted at the end; because of that isolation a LibreOffice the user has open is **not** a problem and is left alone. Only the skill's **own** leftovers (the isolated `lo_profile` runs) are closed. `--cerrar-libreoffice` closes **every** LibreOffice process first and warns that unsaved documents are lost. The `Could not find platform independent libraries <prefix>` warning on stderr is benign. Do **not** launch `soffice` through a shell background operator or `Start-Process`: the child inherits the pipe handle and the reader hangs (see `references/word-toc-fields.md`).
 
-7. **Verify before delivering** with `python scripts/apa7.py verify --pdf "document.pdf" --manifiesto "MANIFEST.json"`: cover in 3 zones and members in a single paragraph (**this is checked, as a warning**), indices with the correct page number, captions with number and title, tables with content, **each table with its note below it in the PDF**, **each figure note above its image**, references with hanging indent. `verify` picks the `.venv` interpreter on its own, because that is where `pymupdf` lives. The cover warnings (logo or instructor title not asked about) **are not failures**: they are reported to the user and the document is delivered. If a critical check fails, fix and export again.
+7. **Verify before delivering** with `python scripts/apa7.py verify --pdf "document.pdf" --manifiesto "MANIFEST.json"`: cover in 3 zones and members in a single paragraph (**this is checked, as a warning**), indices with the correct page number, captions with number and title, tables with content, **each table with its note below it in the PDF**, **each figure note above its image**, references with hanging indent. With no `--json` the report goes to `<md>_apa/datos/verificacion.json`. `verify` picks the `.venv` interpreter on its own, because that is where `pymupdf` lives. The cover warnings (logo or instructor title not asked about) **are not failures**: they are reported to the user and the document is delivered. If a critical check fails, fix and export again. **A failed verification never deletes anything**: the PDF and the working folder stay on disk to be inspected.
 
-8. **Deliver both files** (`.docx` and `.pdf`).
+8. **Deliver both files** (`.docx` and `.pdf`), and mention the working folder so the user knows the intermediate files are there and can be deleted.
 
 ## Rules already defined (do not ask again)
 
@@ -233,7 +278,7 @@ propia`, unless the `.md` or a JSON indicate otherwise. That is not asked.
 | `scripts/build-docx.js` | `MANIFEST.json` → `.docx` (cover, indices as real `TOC` fields, tables, figures, references). Splits the body into sections and moves tables that do not fit in portrait to a landscape page. Accepts `--paginas-json` to cache the index page numbers (second pass). **Aborts with code 4 if a title or caption is missing.** Reached through `apa7.py build`. |
 | `scripts/paginas-de-pdf.py` | Reads the throwaway PDF of the first pass and writes the real 1-based page of each section/table/figure, for the second `--paginas-json` build. Reached through `apa7.py build`; run with `--pdf`, `--manifiesto`, `--out`. |
 | `scripts/verificar-pdf.py` | Verifies the `.pdf` (pymupdf): cover, indices, captions, indents, table notes below and figure notes above the image, plus that the index page numbers match the real pages. Reached through `apa7.py verify`. |
-| `scripts/lib/rutas.py` | Portable resolution of paths, Python, Node and LibreOffice, the version pins, and the isolated-profile LibreOffice runner with its per-profile process cleanup. |
+| `scripts/lib/rutas.py` | Portable resolution of paths, Python, Node and LibreOffice, the version pins, and the isolated-profile LibreOffice runner with its per-profile process cleanup. Also the single source of truth for **where a document's files go**: the working folder name (`<md>_apa/`), `datos/`, `logs/`, the `fuente.json` anchor and the default `--out`/`--log`/`--json`/`--outdir` for each phase. Standard library only. |
 | `scripts/lib/instalador.py` | Installation plans per package manager and the non-interactive elevation. |
 | `scripts/lib/fuentes.py` | Which embedded font names the verifier accepts: Times New Roman and its metric-compatible substitutes. |
 | `scripts/tests/` | Unit tests, run with `python -m unittest discover -s scripts/tests -t scripts/tests`. |
