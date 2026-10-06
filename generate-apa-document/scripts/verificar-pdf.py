@@ -461,6 +461,19 @@ def verificar(args):
             R.anota("The instructor's title was asked about", False,
                     "docente_titulo empty: their title or profession must be asked about", critico=False)
 
+        # The course/NRC and the vice-rector's office are OPTIONAL cover fields
+        # (references/institutional-cover.md). When they are absent the cover is
+        # generated without that line and without any blank gap, and this is a
+        # WARNING for the agent to ask about, never a failure: the same
+        # treatment the logo gets above.
+        for campo, etiqueta in (
+                ("vicerrectoria", "The vice-rector's office line was asked about"),):
+            if not portada.get(campo):
+                R.anota(etiqueta, False,
+                        "%s empty: the field is optional, but it must be asked "
+                        "about before omitting it" % campo,
+                        critico=False)
+
     # --- 5. Sections ----------------------------------------------------
     faltantes = []
     for s in M.get("secciones", []):

@@ -2,7 +2,7 @@
 
 Skill `generate-apa-document`. Builds a **Word (.docx) and PDF** academic document following the **APA 7th edition** rules, ready to submit: institutional cover page, table of contents and lists of tables/figures with real page numbers, all from a source Markdown `.md` (extracted with MinerU/Docling, for example).
 
-> **Export engine: LibreOffice (headless). Microsoft Word is not required.**
+> **Export engine: headless LibreOffice (the fallback). The default engine is **auto**, which probes for Word on Windows/macOS; Word is used only when available and proven usable.**
 
 ---
 
@@ -28,7 +28,7 @@ It is not a PDF-to-Word converter: it starts from a `.md` that already exists. W
 | **Node.js LTS + npm** | generating the `.docx` with the `docx` library | `winget install OpenJS.NodeJS.LTS`, `brew install node`, or the distro package |
 | **`docx` library (npm)** | building the cover, TOC, indices and tables | `npm install docx@9.7.1 --no-save` |
 | **`pymupdf` 1.28.2** | verifying the final PDF | installed into `.venv`, not into the system Python |
-| **LibreOffice** | **the only engine** for `.docx → .pdf` conversion | `winget install TheDocumentFoundation.LibreOffice`, `brew install --cask libreoffice`, or the distro package |
+| **LibreOffice** | engine for `.docx → .pdf` conversion (LibreOffice by default; **Word** optional via `auto` probe on Windows/macOS) | `winget install TheDocumentFoundation.LibreOffice`, `brew install --cask libreoffice`, or the distro package |
 | **Internet connection** | package manager, npm and pip downloads | — |
 
 Everything above except the internet is installed by `apa7.py install`, which picks the available package manager (`winget`, `brew`, `apt`, `dnf` or `pacman`) or prints the command to run by hand.
@@ -82,7 +82,7 @@ The pipeline accepts three levels of input:
 
 ### 2. Answer only what is missing
 
-Almost everything comes from your files. The skill will only ask you for the **data that does not appear** in your documents: cover data (instructor and their title/profession, course and its code, date), logo (optional, only if you provide it), table or figure titles/captions that do not come with one and, when in doubt, whether the document really has no tables or figures.
+Almost everything comes from your files. The skill will only ask you for the **data that does not appear** in your documents: cover data (instructor and their title/profession, course and its code, date), logo (optional, only if you provide it), table or figure titles/captions that do not come with one and, when in doubt, whether the document really has no tables or figures. Three cover items — the logo, the instructor's title and the vice-rector's office — are **always asked about but never block delivery**: if they end up missing, the cover is generated without that line and the verifier reports it as a warning. The course/NRC line is now a required field — it must be answered before delivery.
 
 **Hard rule:** while there are questions marked as blocking, the document **is not built**. Nothing is filled with invented text and the `.docx` is not patched by hand.
 
@@ -117,6 +117,30 @@ You do not pass `--out`, `--log`, `--outdir` or `--json`: each phase derives its
 - `--carpeta-trabajo <dir>` moves the working folder when the document lives elsewhere, and works on `parse`, `build`, `export` and `verify`.
 - **Explicit flags always win.** Passing `--outdir` to `export` keeps its old behaviour (PDF *and* `_logs/03-export.log` there), so existing scripts and callers are unaffected. That is the only case that still writes `_logs/`.
 
+## Quick example
+
+```bash
+# 1. Check environment
+python scripts/apa7.py check
+
+# 2. If missing tools, install them
+python scripts/apa7.py install --yes
+
+# 3. Parse the .md (with optional layout JSON and cover data)
+python scripts/apa7.py parse --md "informe.md" --portada "portada.json"
+
+# 4. Build the .docx (two-pass, with real page numbers)
+python scripts/apa7.py build --manifiesto "informe_apa/datos/MANIFEST.json"
+
+# 5. Export to PDF
+python scripts/apa7.py export --docx "informe.docx"
+
+# 6. Verify the PDF
+python scripts/apa7.py verify --pdf "informe.pdf" --manifiesto "informe_apa/datos/MANIFEST.json"
+
+# Deliverables: informe.docx, informe.pdf, and informe_apa/ for inspection
+```
+
 ## Workflow
 
 1. **Activation** — the user asks for an academic document in APA (by intent).
@@ -145,10 +169,10 @@ Activation
 
 - **Image size without guessing by eye:** the parser reads each figure's `bbox` in the layout JSON (normalized to 0..1000), keeps its real proportion and clamps the width to the usable content width.
 - **Prose and order come from the `.md`**, not the JSON: the JSON files enrich the table width and the figure size, but do not rewrite the text.
-- **Genuinely functional TOC:** the indices are real `TOC` fields (`TOC \h \u` for the contents, `TOC \c "Tabla" \h` / `TOC \c "Figura" \h` for the lists), and their cached result carries the real pages measured in the double pass; Word recalculates them when the document is opened. Table and figure captions use real `SEQ` fields, which is what `TOC \c` collects.
+- **Genuinely functional TOC:** the indices are real `TOC` fields (`TOC \h \u` for the contents, `TOC \c "Tabla" \h` / `TOC \c "Figura" \h` for the lists), and their cached result carries the real pages measured in the double pass; Word recalculates them when the document is opened. Table and figure captions use real `SEQ` fields, which is what `TOC \c` collects, and the whole legend (`Tabla 1.`) renders **bold** — number included, written by the field's cached run.
 - **Tables renderable in LibreOffice:** explicit width (`width` + `columnWidths` + `layout: FIXED`) and horizontal-only borders; without this, LibreOffice does not show them (known bug).
 - **Automatic per-table orientation:** a table that does not fit in portrait (6 or more columns, or very long cells) moves on its own to a **landscape page** with its title and note; afterwards the text returns to portrait. The criterion is legibility, not the number of rows.
-- **Figure note above the image; table note below the table** (APA 7 distinguishes them by position, not only by text).
+- **Figure note below the image** (generator default); **table note below the table** (APA 7 distinguishes them by position, not only by text).
 - **Clean export:** the resolved `soffice` binary is invoked directly, with its output redirected to files (never to an inherited pipe), an isolated LibreOffice profile per run and a temporary copy. Because the profile is isolated, a LibreOffice the user has open is left alone; only the skill's own leftover runs are closed (opt in to closing everything with `export --cerrar-libreoffice`, which warns that unsaved documents are lost). The run has a hard timeout reported as exit code 124 rather than as a silent failure. The `Could not find platform independent libraries <prefix>` message on stderr is benign and ignored.
 - **Terms kept intact only on request:** the pipeline ships no whitelist of untouchable terms, because that data belongs to one concrete document and not to the tool. URLs, DOIs, e-mails and file names are protected automatically; any other term (`NodeJS`, `SHA256`) can be kept intact by listing it in a protected-terms file and passing `--terminos-protegidos <ARCHIVO>`. Otherwise the deglue splits it and reports it under **Review** (ambiguous) instead of among the clear corrections, and the residue report lists every stretch it could not separate.
 
@@ -158,12 +182,17 @@ Activation
 Generator-APA7/
 ├── .gitignore                           # single ignore file: generated state, env data
 ├── README.md
+├── LICENSE                              # AGPL-3.0 license
+├── CHANGELOG.md                         # release notes
+├── .github/
+│   └── workflows/
+│       └── ci.yml                       # CI: unittest + apa7.py check + install --dry-run
 └── generate-apa-document/
     ├── SKILL.md                          # skill definition (activation, workflow, rules)
     ├── references/
     │   ├── apa7-format.md                # APA 7 formatting rules
     │   ├── institutional-cover.md        # 3-zone cover layout
-    │   ├── word-toc-fields.md            # functional TOC/indices and docx/LibreOffice pitfalls
+    │   ├── word-toc-fields.md            # functional TOC/indices and docx/engine pitfalls
     │   └── system-requirements.md        # tools, preflight and path resolution
     ├── scripts/
     │   ├── apa7.py                      # entry point: check/install/export/parse/build/verify
@@ -175,7 +204,9 @@ Generator-APA7/
     │   └── lib/
     │       ├── rutas.py                  # portable path and tool resolution, and where a document's files go
     │       ├── instalador.py             # installation plans per package manager
-    │       └── fuentes.py                # font names accepted by the verifier
+    │       ├── fuentes.py                # font names accepted by the verifier
+    │       ├── motores.py                # engine detection (Word/LibreOffice/auto)
+    │       └── word.py                   # Word COM/osascript driver and cache
     ├── .work/                            # generated state (docx's node_modules)
     └── .venv/                            # generated state (pinned pymupdf)
 ```
@@ -186,12 +217,21 @@ Generator-APA7/
 - It does not convert directly from PDF to Word: it starts from a `.md` already extracted by MinerU or Docling. The layout JSON is optional, but without it the figures do not keep their real size.
 - **APA 7 letter format with 1 in margins**, with no extra institutional rules.
 - The cover page carries no visible page number; numbering starts on page 2.
-- The `TOC` fields and the double pass are verified against **LibreOffice** (the shipped PDF). Word is not required and has not been tested locally; if a user updates the index fields *in Word*, the lists of tables/figures may keep only the number (Word's `\c` collects the caption paragraph, and the APA caption number and title are separate paragraphs). The delivered PDF already carries the full entries.
+- The `TOC` fields and the double pass are verified against **LibreOffice** (the shipped PDF). Word is not required: the default suite never starts it, and an opt-in integration test (`APA7_TEST_WORD_REAL=1`) exercises the Word export driver only when a real Word install is present (it passed on this machine). If a user updates the index fields *in Word*, the lists of tables/figures may keep only the number (Word's `\c` collects the caption paragraph, and the APA caption number and title are separate paragraphs). The delivered PDF already carries the full entries.
 - **Automated checks (CI).** `.github/workflows/ci.yml` runs the test suite (`unittest`) plus `apa7.py check` and `install --dry-run` on Windows, macOS and Linux with Python 3.9 and 3.12. It does **not** install LibreOffice, so the end-to-end `.docx → .pdf` export is not exercised there. The workflow has not run yet (there is no CI history in the repository), so the cross-OS claims above are pending that first run.
+
+## Contributing
+
+1. Fork the repository and create a feature branch.
+2. Run the test suite: `python -m unittest discover -s scripts/tests -t scripts/tests`.
+3. Run the preflight: `python scripts/apa7.py check`.
+4. Make your changes and ensure all tests pass.
+5. Update CHANGELOG.md under `[Unreleased]` with your changes.
+6. Submit a pull request with a clear description of the changes.
 
 ## License
 
-No license has been chosen yet. Until one is added, the code is **all rights reserved**: no one may reuse, modify or redistribute it. To allow others to use it, add a `LICENSE` file (for example MIT or Apache-2.0) and record the choice here.
+The code is licensed under **AGPL-3.0** (see `LICENSE` file).
 
 ---
 

@@ -17,7 +17,10 @@
  *   - The cover page has NO page number; visible numbering starts on
  *     page 2, which is what APA 7 requires.
  *   - Tables and figures: number in bold, title in italics, then the
- *     object. Horizontal borders only in tables.
+ *     object. Horizontal borders only in tables. The note ("Nota. ...")
+ *     goes BELOW the table or the image, never above it.
+ *   - Table of contents / list of tables / list of figures: real TOC
+ *     fields, Times 12, entries not bold.
  *   - References: 0.5" hanging indent, alphabetical order.
  *
  * Usage:
@@ -168,6 +171,20 @@ const MARGEN_CELDA_LR = 160;          // cell left and right margins
 function sinEtiquetaNota(texto) {
   return String(texto == null ? "" : texto)
     .replace(/^\s*(nota|note)\s*[.:]\s*/i, "");
+}
+
+// The whole legend of a caption is bold ("Tabla 1.", "Figura 2."), the title
+// that follows is italics. SimpleField writes its cached result with a DEFAULT
+// run, so the number always came out plain and only the word was bold. This
+// subclass keeps the field (a real SEQ, which is what "TOC \c" collects) and
+// writes the cached number with the same run properties as the label.
+// The instruction is passed to super() WITHOUT the cached value on purpose:
+// super() would already have pushed its own run for it.
+class CampoSecuencia extends SimpleField {
+  constructor(instruccion, valor) {
+    super(instruccion);
+    this.root.push(new TextRun({ text: String(valor), bold: true, font: FUENTE, size: TAM }));
+  }
 }
 
 // docx@9 always emits a <w:tblGrid>, and when columnWidths is omitted it fills
@@ -569,8 +586,9 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
         new TextRun({ text: "Tabla ", bold: true, font: FUENTE, size: TAM }),
         // A real SEQ field, not the literal number: "TOC \c \"Tabla\"" only
         // collects captions that carry "SEQ Tabla". The cached value keeps the
-        // number visible even before Word recalculates the field.
-        new SimpleField(" SEQ Tabla \\* ARABIC ", String(t.indice)),
+        // number visible even before Word recalculates the field, and it is
+        // bold like the rest of the legend.
+        new CampoSecuencia(" SEQ Tabla \\* ARABIC ", String(t.indice)),
       ],
     })],
   }));
@@ -659,7 +677,7 @@ function construirFigura(f) {
       id: `apa_fig_${f.indice}`,
       children: [
         new TextRun({ text: "Figura ", bold: true, font: FUENTE, size: TAM }),
-        new SimpleField(" SEQ Figura \\* ARABIC ", String(f.indice)),
+        new CampoSecuencia(" SEQ Figura \\* ARABIC ", String(f.indice)),
       ],
     })],
   }));
@@ -907,7 +925,11 @@ function construirCuerpoSegmentado(hayContenidoPrevio) {
         break;
       }
 
+      // The parser already attached this paragraph to its table or figure
+      // (caption or a "Nota." line written in the .md): it is printed by
+      // construirTabla()/construirFigura(), never as body text.
       case "nota_tabla":
+      case "nota_figura":
         break;
 
       default:
@@ -1086,13 +1108,14 @@ async function main() {
       },
       // The cached TOC entries are emitted with the built-in TOC1..TOC5 styles.
       // Defining them here keeps the indexes in APA type (Times 12, double
-      // spaced, level-1 entries bold) instead of whatever the renderer falls
+      // spaced, entries NOT bold even when the section title is: see
+      // references/apa7-format.md) instead of whatever the renderer falls
       // back to when the style is missing.
       paragraphStyles: Array.from({ length: 5 }, (_, i) => ({
         id: `TOC${i + 1}`,
         name: `TOC ${i + 1}`,
         quickFormat: true,
-        run: { font: FUENTE, size: TAM, bold: i === 0 },
+        run: { font: FUENTE, size: TAM },
         paragraph: {
           spacing: { line: DOBLE, before: 0, after: 0 },
           indent: { left: i * SANGRIA_1RA },

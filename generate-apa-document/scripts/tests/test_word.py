@@ -1,9 +1,9 @@
 """Tests for the PDF engine choice: lib/motores.py and lib/word.py.
 
-Standard library only, and nothing here ever launches Word: every export is a
-fake `_correr`. The only test that talks to real Word is a manual one, because
-`check` on a machine that has Word must be provable by hand and never by a
-surprise in the suite.
+Standard library only, and nothing here ever launches Word in the default
+suite: every export is a fake `_correr`. The only test that talks to real Word
+is an opt-in one (TestWordReal), gated by APA7_TEST_WORD_REAL=1, for when the
+real driver needs a provable run.
 
 Run them with:
     python -m unittest discover -s scripts/tests -v
@@ -12,6 +12,7 @@ import base64
 import contextlib
 import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -412,6 +413,13 @@ class TestExportar(PlatformMixin, unittest.TestCase):
         self.winword = mock.patch.object(rutas, "word_path", return_value=r"C:\P\WINWORD.EXE")
         self.winword.start()
         self.addCleanup(self.winword.stop)
+        # exportar() also refuses on a platform with no Word driver before it
+        # ever looks at an open Word or a driver, so the flow below must always
+        # believe it is on a supported platform, whatever OS runs the suite.
+        for nombre, valor in (("is_windows", True), ("is_macos", False), ("is_linux", False)):
+            parche = mock.patch.object(rutas, nombre, return_value=valor)
+            parche.start()
+            self.addCleanup(parche.stop)
         # No sleeping in the leftover poll.
         self.reloj = mock.patch.object(word_mod, "time")
         self.reloj.start()
@@ -535,6 +543,15 @@ class TestDisponible(unittest.TestCase):
         self.workdir = mock.patch.object(rutas, "workdir", return_value=self.work / ".work")
         self.workdir.start()
         self.addCleanup(self.workdir.stop)
+        # disponible() refuses before anything else on a platform with no Word
+        # driver. These tests exercise the probe/cache logic, not the host OS,
+        # so they must always believe they are on a supported platform (exactly
+        # one of them, test_a_platform_without_a_driver_is_never_probed, pins
+        # the opposite on purpose).
+        for nombre, valor in (("is_windows", True), ("is_macos", False), ("is_linux", False)):
+            parche = mock.patch.object(rutas, nombre, return_value=valor)
+            parche.start()
+            self.addCleanup(parche.stop)
 
     def _sondeo(self, ok=True, version="16.0", motivo="", transitorio=False):
         resultado = word_mod.Resultado(
@@ -716,6 +733,35 @@ class TestSondear(unittest.TestCase):
             self.assertFalse(word_mod._limpiar_scratch(Path(tempfile.gettempdir()) / "x"))
         log.assert_called_once()
         self.assertIn("safe to remove it by hand", log.call_args[0][0])
+
+
+class TestWordReal(unittest.TestCase):
+    """OPT-IN integration test: a true export with the real Word driver.
+
+    The default suite never launches Word: every export above fakes `_correr`.
+    Setting APA7_TEST_WORD_REAL=1 opts into one genuine export, which starts and
+    quits Word. It skips itself when the machine has no Word driver, so a red
+    result is always a real regression and never a machine that cannot run it.
+    """
+
+    def setUp(self):
+        if os.environ.get("APA7_TEST_WORD_REAL") != "1":
+            self.skipTest("set APA7_TEST_WORD_REAL=1 to run the real-Word export")
+        estado = word_mod.disponible(probar=False)
+        if not estado.ok:
+            self.skipTest("no Word driver on this machine: %s" % estado.motivo)
+
+    def test_word_exporta_un_docx_real_a_pdf(self):
+        tmp = Path(tempfile.mkdtemp(prefix="apa7_word_real_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        docx = word_mod.docx_minimo(tmp / "prueba.docx")
+        pdf = tmp / "prueba.pdf"
+        resultado = word_mod.exportar(docx, pdf, timeout=120)
+        self.assertEqual(resultado.exit_code, 0, resultado.motivo)
+        self.assertTrue(resultado.pdf_creado, resultado.motivo)
+        self.assertTrue(pdf.is_file())
+        with pdf.open("rb") as fh:
+            self.assertEqual(fh.read(4), b"%PDF")
 
 
 if __name__ == "__main__":

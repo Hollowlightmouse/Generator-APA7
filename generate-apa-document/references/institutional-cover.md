@@ -82,8 +82,8 @@ content changes.
 | Title | `titulo` | Bold, centered. It may span several lines. |
 | Authors | `autores` | **A single centered paragraph**, not bold. Full names separated by commas and with "y" before the last one, no matter how many there are. Not one per line. It accepts `"Nombre Apellido y Nombre Apellido"` or `["Nombre Apellido", "Nombre Apellido"]`: the text is respected as is, without splitting it or assuming authors. |
 | Faculty and university | `facultad` | One centered line, exactly as it appears in the source document. |
-| Location or unit | `vicerrectoria` | Centered, optional. |
-| Course and code | `materia_nrc` | Centered, exactly as it appears in the document. The field accepts any course code (for example an NRC), not just that format. |
+| Location or unit | `vicerrectoria` | Centered, optional. Always asked about when missing, but its absence never blocks delivery: the cover is generated without that line and `verificar-pdf.py` warns. |
+| Course and code | `materia_nrc` | Centered, exactly as it appears in the document. The field accepts any course code (for example an NRC), not just that format. Always asked about when missing, but its absence now blocks delivery: the cover is generated without that line and delivery is blocked until the field is provided; `verificar-pdf.py` does not reach this field because it blocks earlier. |
 | Instructor | `docente` | Centered. Their degree or title is always asked about (`docente_titulo`), unless the user says to skip it that time. |
 | Date | `fecha` | Centered, in the document's format. |
 
@@ -100,6 +100,16 @@ General skill rule, not just for the cover page:
   inserted.
 - The instructor's degree or title is a separate case: it is **always asked
   about**, even if the rest of the cover page is complete.
+
+Most cover fields **block delivery** until they are answered: title, members,
+faculty / university, instructor and date; their absence always opens a blocking
+question in `pendientes_bloqueantes`. Three fields are the opposite — **always
+asked, never blocking**: the logo, the instructor's title / profession and the
+vice-rector's office (`vicerrectoria`). If one of them stays missing, the cover is
+generated without that line and the document is delivered; `verificar-pdf.py` flags
+each one as a warning so the agent still mentions it. The course/NRC line
+(`materia_nrc`) is now **blocking**: it must be answered before delivery; if the
+user omits it, delivery is blocked until the field is provided.
 
 ## How it is filled in practice
 

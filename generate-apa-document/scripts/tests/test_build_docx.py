@@ -177,6 +177,71 @@ class _BuildReal(unittest.TestCase):
         self.assertIn("<w:keepNext/>", p_imagen)
         self.assertNotIn("<w:keepNext/>", p_nota)
 
+    # -- the caption legend (real SEQ, all bold) ---------------------------
+    # T4b: the legend ("Tabla 1.", "Figura 2.") is a real SEQ field, which is
+    # what "TOC \c" collects, and the WHOLE legend is bold. CampoSecuencia
+    # exists because SimpleField wrote its cached number with a DEFAULT run,
+    # so the number always came out plain while only the word was bold.
+
+    def _caption_de(self, xml, etiqueta):
+        import re
+        return next(p for p in re.findall(r"<w:p[ >].*?</w:p>", xml, re.S)
+                    if "<w:fldSimple" in p and etiqueta in p)
+
+    def _cada_run_visible_es_negrita(self, parrafo):
+        import re
+        vacios = []
+        for run in re.findall(r"<w:r>.*?</w:r>", parrafo, re.S):
+            if "<w:t" in run and "<w:b/>" not in run:
+                vacios.append(run)
+        return vacios
+
+    def test_la_leyenda_de_la_tabla_es_una_secuencia_real_toda_en_negrita(self):
+        import re
+        xml = self._construye(self._manifiesto(
+            nota_tabla="Fuente.", nota_figura="Fuente."))
+        p = self._caption_de(xml, "Tabla ")
+        self.assertIn('w:instr=" SEQ Tabla \\* ARABIC "', p)
+        self.assertEqual(self._cada_run_visible_es_negrita(p), [], p)
+        # The legend reads the cached number, not a blank field.
+        self.assertEqual("".join(re.findall(r"<w:t[^>]*>(.*?)</w:t>", p, re.S)),
+                         "Tabla 1", p)
+
+    def test_la_leyenda_de_la_figura_es_una_secuencia_real_toda_en_negrita(self):
+        import re
+        xml = self._construye(self._manifiesto(
+            nota_tabla="Fuente.", nota_figura="Fuente."))
+        p = self._caption_de(xml, "Figura ")
+        self.assertIn('w:instr=" SEQ Figura \\* ARABIC "', p)
+        self.assertEqual(self._cada_run_visible_es_negrita(p), [], p)
+        self.assertEqual("".join(re.findall(r"<w:t[^>]*>(.*?)</w:t>", p, re.S)),
+                         "Figura 1", p)
+
+    # -- the TOC entries are not bold --------------------------------------
+    # T4c: the cached entries of the indexes come out in the TOC style, never
+    # bold. (The index TITLES are headings and are bold; the entries are not.)
+
+    def test_las_entradas_del_toc_no_son_negritas(self):
+        import re
+        man = self._manifiesto(nota_tabla="Fuente.", nota_figura="Fuente.")
+        man["opciones"]["indice_tablas"] = True
+        man["opciones"]["indice_figuras"] = True
+        man["secciones"] = [{"texto": "Introduccion", "hid": "introduccion",
+                             "nivel": 1}]
+        xml = self._construye(man)
+        toc = [p for p in re.findall(r"<w:p[ >].*?</w:p>", xml, re.S)
+               if "<w:instrText" in p and "TOC " in p and "<w:hyperlink" in p]
+        self.assertTrue(len(toc) >= 2, len(toc))  # content + tables + figures
+        for p in toc:
+            self.assertIn('w:pStyle w:val="TOC1"', p, p)
+            self.assertNotIn("<w:b/>", p, p)
+            self.assertIn('w:rStyle w:val="IndexLink"', p, p)
+        # Every index entry points at its caption's bookmark, proving the
+        # cached entry list was really built (not an empty placeholder field).
+        self.assertIn('w:anchor="apa_tbl_1"', xml)
+        self.assertIn('w:anchor="apa_fig_1"', xml)
+        self.assertIn('w:anchor="apa_sec_', xml)
+
 
 if __name__ == "__main__":
     unittest.main()

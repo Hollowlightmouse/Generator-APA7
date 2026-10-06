@@ -98,8 +98,8 @@ otherwise portrait. When doing so:
   **"Nota. Elaboración propia."**, unless the `.md` indicates another source; the
   parser fills it in on its own (`nota_origen: "default"`) and with
   `--notas-tabla-json` / `--notas-figura-json` a specific one is substituted.
-- **The position does distinguish the case, and it is not negotiable:**
-  - **FIGURE note: above the image.**
+- **The position distinguishes the case:**
+  - **FIGURE note: below the image.**
   - **TABLE note: below the table.**
 - The figure note has `keepNext` so that it does not end up alone at the bottom of a
   page while its image jumps to the next one. Without that the document looks

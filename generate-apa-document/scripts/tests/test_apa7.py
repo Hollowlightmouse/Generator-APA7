@@ -606,7 +606,12 @@ class TestExport(CheckHarness):
         self.assertEqual(code, 2)
         self.assertEqual(out.getvalue(), "")
         run_soffice.assert_not_called()
-        self.assertIn("apa7.py install", err.getvalue())
+        # The hint must contain the EXACT install command as the current shell
+        # renders it: on POSIX the arguments are shlex-quoted, on Windows they
+        # are not, so asserting the literal "apa7.py install" would fail on a
+        # machine where the command is printed as "...apa7.py' install".
+        self.assertIn(rutas.comando_apa7("install", "--only", "libreoffice"),
+                      err.getvalue())
 
     def test_without_docx_the_only_one_of_the_folder_is_exported(self):
         code, out, err = self._export(self._ok_result(), docx=None, outdir=None,

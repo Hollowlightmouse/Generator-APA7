@@ -298,6 +298,36 @@ class TestNotaDeFigura(_Base):
         self.assertIn("not applicable", res["detalle"])
 
 
+class TestPortadaOpcional(_Base):
+    """vicerrectoria/materia_nrc absence is a WARNING, never a failure."""
+
+    def _man(self, portada, nombre):
+        man = manifiesto(0)
+        man["portada"] = portada
+        return self._escribe(nombre, man)
+
+    def test_missing_optional_fields_warn_without_blocking(self):
+        man = self._man({}, "port1.json")
+        pdf = self._pdf_con_lineas("portada_vacia.pdf", ["Titulo del trabajo"])
+        res = self._verifica(pdf, man)
+        for clave in ("The vice-rector's office line was asked about",
+                      "The cover page logo was asked about"):
+            self.assertIn(clave, res, clave)
+            self.assertFalse(res[clave]["critico"], clave)
+            self.assertFalse(res[clave]["ok"], clave)
+
+    def test_present_fields_do_not_emit_the_asked_about_warning(self):
+        man = self._man({"materia_nrc": "NRC 91827",
+                         "vicerrectoria": "Vicerrectoría Académica"}, "port2.json")
+        pdf = self._pdf_con_lineas("portada_con_datos.pdf",
+                                   ["Titulo del trabajo",
+                                    "Vicerrectoría Académica",
+                                    "NRC 91827"])
+        res = self._verifica(pdf, man)
+        self.assertNotIn("The course/NRC line was asked about", res)
+        self.assertNotIn("The vice-rector's office line was asked about", res)
+
+
 class TestTipografia(_Base):
     """Only the declared typeface, and only where there is something to read.
 

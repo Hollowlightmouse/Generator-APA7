@@ -31,9 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Limpieza selectiva del perfil de LibreOffice: solo al usar ese motor.
 - Resolución única del motor para evitar doble pasada con distinto motor.
 
+### Changed
+
+- Nota de figura: ahora va **debajo** de la imagen (con `keepNext` en la imagen); nota de tabla sigue debajo de la tabla. Actualizada documentación (SKILL.md, README.md, apa7-format.md).
+- `materia_nrc` (curso/NRC) ahora es **campo bloqueante** en portada: la materia es obligatoria, solo el código NRC es opcional dentro del mismo campo. Ajustado parser, verificador y pruebas.
+- Parser: consume la línea `Nota.` del `.md` sin duplicar (`nota_origen: "md"`); leyenda de caption (`SEQ`) completamente en negrita; entradas de índice (TOC) sin negrita.
+- Pruebas de plataforma: `skipUnless` por SO; suite verde en Windows, macOS y Linux (simulado).
+- Documentación de motores actualizada: `--motor auto|word|libreoffice`; auto sondea Word en Windows/macOS; LibreOffice es fallback; `exit 2` si motor pedido inutilizable; caché `.work/motor-word.json` y `APA7_WORD`.
+- README: licencia AGPL-3.0, estructura del repo, ejemplo rápido, sección de contribución, CI con `unittest`.
+
 ### Test coverage
 
-- 386 tests en verde en `scripts/tests`. Verificación real de corpus Word/LibreOffice OK.
+- All tests passing in `scripts/tests`. Verificación real de corpus Word/LibreOffice OK.
 
 
 ## [1.0.0] - 2026-10-03

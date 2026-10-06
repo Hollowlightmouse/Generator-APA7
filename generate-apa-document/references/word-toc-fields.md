@@ -4,9 +4,11 @@ How to build the indexes so that they come out **functional**, with real page
 numbers, and how to export the result to PDF. This file exists so we don't
 trip over the same already-fixed problems again.
 
-> The filename is historic: the conversion is no longer done by Word. The
-> engine is LibreOffice and everything here applies to the pipeline with
-> `docx` (npm) and LibreOffice.
+> The filename is historic: the conversion was originally done by Word. The
+> default engine is **auto**, which probes for Word on Windows/macOS; if
+> available and usable it is used for the double pass, otherwise LibreOffice
+> (headless) is the fallback. Everything here applies to the pipeline with
+> `docx` (npm) and the resolved export engine.
 
 ## The golden rule
 
@@ -18,7 +20,7 @@ as cached**. So the indexes are real `TOC` fields, and their result is filled in
 by a two-pass build:
 
 1. `build` creates the `.docx` once (indexes without page numbers).
-2. `apa7.py` exports that `.docx` to a throwaway PDF with LibreOffice, and
+2. `apa7.py` exports that `.docx` to a throwaway PDF with the **resolved engine** (Word or LibreOffice), and
    `scripts/paginas-de-pdf.py` reads the real page of every entry from it.
 3. `build-docx.js` runs a second time with `--paginas-json`, and that map
    becomes the **cached result** of the `TOC` fields.

@@ -541,6 +541,11 @@ RE_IMAGEN = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 RE_NUM_HEADING = re.compile(r"^\s*(\d{1,2})[\.\)]\s+(.*)$")
 RE_FIG_CAPTION = re.compile(r"^\s*(?:figura|imagen|image|ilustraci\u00f3n)\s*(\d+)\s*[.:\-\u2013]?\s*(.*)$", re.I)
 RE_TAB_CAPTION = re.compile(r"^\s*(?:tabla|cuadro|table)\s*(\d+)\s*[.:\-\u2013]?\s*(.*)$", re.I)
+# A note written in the .md next to a table or a figure: "Nota. Elaboracion
+# propia" / "Note: own elaboration". The leading emphasis markers are optional
+# because strip_leading_markers() already ate the opening "**" of "**Nota.**",
+# which can leave a stray "**" right after the label.
+RE_NOTA_LINEA = re.compile(r"^\s*\**\s*(?:nota|note)\s*[.:]\s*\**\s*(.+?)\s*$", re.I)
 RE_NRC = re.compile(r"\bNRC\s*[:\s]*\s*([0-9]{4,}[-\u2013A-Za-z0-9]*)", re.I)
 RE_DATE = re.compile(r"(\d{1,2})\s+de\s+([a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+)\s+de\s+(\d{4})", re.I)
 
@@ -1201,6 +1206,62 @@ def analizar(md_path, base_dir, log, aplicar_deglue=True,
             b["indice"] = destino
             b.pop("segmentos", None)
 
+    # --- notes written in the .md, right under a table or a figure --------
+    # MinerU/Docling do not always deliver the footnote as data, and in practice
+    # the .md carries it as an ordinary paragraph: "Nota. Elaboracion propia".
+    # Without this pass that paragraph reaches the .docx as body text (indented,
+    # in the middle of the document) and the table/figure gets the DEFAULT note
+    # instead: the document ends up with two notes, one of them wrong.
+    #
+    # The .md wins over the footnote of the json: `enriquecer_desde_docling`
+    # only writes a note when there is none, exactly like it already does with
+    # the title of a table that the .md already names. The explicit override
+    # `--notas-tabla-json` (applied later) still wins over both.
+    def _destino_de_nota(pos):
+        """Index of the table/figure the note at `pos` belongs to, and whether it
+        is a figure. Looks forward first (the note goes BELOW) and then backward,
+        skipping the caption paragraphs already consumed by the pass above."""
+        for salto in (1, -1):
+            for pasos in range(1, 4):
+                j = pos + salto * pasos
+                if j < 0 or j >= len(bloques):
+                    break
+                v = bloques[j]
+                if v.get("tipo") in ("tabla", "figura"):
+                    return v["indice"], v.get("tipo") == "figura"
+                # A consumed caption belongs to the table/figure: the note can sit
+                # on the far side of it. Anything else ends the search.
+                if v.get("tipo") != "nota_tabla":
+                    break
+        return None, None
+
+    for k, b in enumerate(bloques):
+        if b.get("tipo") != "p" or "segmentos" not in b:
+            continue
+        mn = RE_NOTA_LINEA.match(b["texto"])
+        if not mn:
+            continue
+        destino, es_figura = _destino_de_nota(k)
+        if destino is None:
+            continue
+        nota_md = fix_colon_spacing(mn.group(1)).strip()
+        if not nota_md:
+            continue
+        objetos = figuras if es_figura else tablas
+        if objetos[destino].get("nota"):
+            # Already has a note; the .md line is dropped instead of duplicated.
+            b["tipo"] = "nota_tabla" if not es_figura else "nota_figura"
+            b["indice"] = destino
+            b.pop("segmentos", None)
+            continue
+        objetos[destino]["nota"] = nota_md
+        objetos[destino]["nota_origen"] = "md"
+        b["tipo"] = "nota_tabla" if not es_figura else "nota_figura"
+        b["indice"] = destino
+        b.pop("segmentos", None)
+        log("%s note (line %d) taken from the .md: %s"
+            % ("Figure" if es_figura else "Table", k + 1, nota_md[:60]))
+
     # --- table and figure numbering ---------------------------------
     for k, tb in enumerate(tablas):
         tb["indice"] = k + 1
@@ -1718,12 +1779,20 @@ def main():
 
     # Cover fields that are ASKED about but do NOT block: the document is
     # built just fine without them. This is consistent with the warnings (critico=False) that
-    # verificar-pdf.py emits for the same two fields.
-    PORTADA_SIN_BLOQUEAR = {"logo", "docente_titulo"}
+    # verificar-pdf.py emits for the same fields.
+    #
+    # vicerrectoria and materia_nrc used to block delivery. They are optional
+    # (references/institutional-cover.md): the cover prints the line only if the
+    # value exists, and a missing one never leaves a blank gap.
+    PORTADA_SIN_BLOQUEAR = {"logo", "docente_titulo", "vicerrectoria"}
     PREGUNTA_PORTADA = {
         "logo": ("There is no logo on the cover. If one is provided it is placed above the "
                  "title. Is it included or omitted?"),
         "docente_titulo": "What is the title or profession of the docente?",
+        "materia_nrc": ("There is no course/NRC line on the cover. Provide the course and its "
+                        "code, or omit the line?"),
+        "vicerrectoria": ("There is no vice-rector's office line on the cover. Provide it, or "
+                          "omit the line?"),
     }
 
     for c in portada["campos_faltantes"]:
