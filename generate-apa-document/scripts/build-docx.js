@@ -159,6 +159,17 @@ const UMBRAL_LINEAS_APRETADAS = 8;    // lines per cell that are no longer reada
 const ANCHO_CARACTER_TWIP = 120;      // average character width at 12 pt
 const MARGEN_CELDA_LR = 160;          // cell left and right margins
 
+// The "Nota." label is written by this script, in Spanish, before the note's
+// text. A note that already carries the label (the user pasted it, or the agent
+// wrote "Nota. Elaboracion propia" because that is how it reads in a document)
+// would otherwise be printed as "Nota. Nota. Elaboracion propia". Only a
+// LEADING label is removed, and only once; a note that merely mentions the word
+// ("Segun la nota del autor...") is left untouched.
+function sinEtiquetaNota(texto) {
+  return String(texto == null ? "" : texto)
+    .replace(/^\s*(nota|note)\s*[.:]\s*/i, "");
+}
+
 // docx@9 always emits a <w:tblGrid>, and when columnWidths is omitted it fills
 // that grid with 100 twips per column. The per-cell widths (tcW) are written too,
 // so which of the two wins depends on the consumer. Passing columnWidths makes
@@ -622,7 +633,7 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
       spacing: { line: 240, before: 0, after: 0 },
       children: [
         new TextRun({ text: "Nota. ", italics: true, font: FUENTE, size: TAM }),
-        new TextRun({ text: t.nota, font: FUENTE, size: TAM }),
+        new TextRun({ text: sinEtiquetaNota(t.nota), font: FUENTE, size: TAM }),
       ],
     }));
   }
@@ -730,33 +741,31 @@ function dimensionesImagen(ruta) {
     altoPx = Math.round(altoPx * k);
   }
 
-  // The FIGURE's general note goes ABOVE the image (APA 7 distinguishes it from
-  // the table's, which goes below). Back in the day it was pushed after the
-  // ImageRun, which is the position of the specific note, not the general one.
-  //
-  // keepNext is mandatory: without it, a note at the end of a page stays alone and
-  // its image jumps to the next one, leaving figure N's note on the previous
-  // page. That is exactly the case that produces an inconsistent document.
-  if (f.nota) {
-    hijos.push(new Paragraph({
-      spacing: { line: 240, before: 0, after: 0, lineRule: LineRuleType.AUTO },
-      keepNext: true,
-      children: [
-        new TextRun({ text: "Nota. ", italics: true, font: FUENTE, size: TAM }),
-        new TextRun({ text: f.nota, font: FUENTE, size: TAM }),
-      ],
-    }));
-  }
-
+  // keepNext on the IMAGE, not on the note: the note goes BELOW the image
+  // (APA 7), so it is the image that has to be pulled to the next page to keep
+  // the two together. With keepNext on the note instead, a note at the top of a
+  // page would drag a note away from the figure it belongs to, which is the
+  // same defect in the opposite direction.
   hijos.push(new Paragraph({
     alignment: AlignmentType.CENTER,
     spacing: { line: 240, before: 0, after: 0, lineRule: LineRuleType.AUTO },
+    keepNext: !!f.nota,
     children: [new ImageRun({
       type: tipo,
       data: fs.readFileSync(f.ruta_absoluta),
       transformation: { width: anchoPx, height: altoPx },
     })],
   }));
+
+  if (f.nota) {
+    hijos.push(new Paragraph({
+      spacing: { line: 240, before: 0, after: 0, lineRule: LineRuleType.AUTO },
+      children: [
+        new TextRun({ text: "Nota. ", italics: true, font: FUENTE, size: TAM }),
+        new TextRun({ text: sinEtiquetaNota(f.nota), font: FUENTE, size: TAM }),
+      ],
+    }));
+  }
 
   return hijos;
 }

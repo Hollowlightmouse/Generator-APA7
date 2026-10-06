@@ -23,7 +23,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import apa7  # noqa: E402
+from lib import motores as motores_mod  # noqa: E402
 from lib import rutas  # noqa: E402
+from lib import word as word_motor  # noqa: E402
 
 
 class _Line:
@@ -85,6 +87,13 @@ class _Env:
             "node_dir": workdir,
             "soffice_path": "/usr/bin/soffice",
             "soffice_candidates": ["/usr/bin/soffice"],
+            # No Word unless a test asks for it: the default machine in these
+            # tests is a LibreOffice one, on purpose, so nothing here depends on
+            # whether the machine running the suite happens to have Word.
+            "word_path": None,
+            "word_candidates": [r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE"],
+            "word_clase_registrada": False,
+            "word_pids": [],
             "package_manager": rutas.PackageManager("apt", "/usr/bin/apt-get"),
             "run": _fake_run,
             "run_soffice": lambda *a, **k: _Line(stdout="LibreOffice 26.8.0.3"),
@@ -110,13 +119,119 @@ class _Env:
 
 
 class CheckHarness(unittest.TestCase):
-    def run_check(self, env=None):
+    def run_check(self, env=None, args=None):
         """Run cmd_check and return (exit_code, stdout, stderr)."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with env or _Env():
-                code = apa7.cmd_check(None)
+                code = apa7.cmd_check(args)
         return code, out.getvalue(), err.getvalue()
+
+    def run_check_con(self, estado, env=None, args=None):
+        """`check` on a machine whose Word answers exactly `estado`."""
+        with mock.patch.object(word_motor, "disponible", return_value=estado) as disponible:
+            code, out, err = self.run_check(env, args)
+        return code, out, err, disponible
+
+
+def _word(ok=True, version="16.0", sondeado=True, ruta=r"C:\P\WINWORD.EXE", motivo=""):
+    return word_motor.Estado(ok=ok, version=version, ruta=ruta, registrada=ok or bool(ruta),
+                             sondeado=sondeado, motivo=motivo)
+
+
+class TestSeleccionDeMotor(CheckHarness):
+    """`check` has to say which engine will run, and prove why.
+
+    Word is the preferred engine, so these tests are mostly about the machine
+    where Word is NOT usable: there, `check` must still be RESULT: OK through
+    LibreOffice, because a machine without Word is not a broken machine.
+    """
+
+    def test_a_probed_word_is_the_engine_and_is_named_in_the_contract_line(self):
+        code, out, err, _ = self.run_check_con(_word(), env=_Env(word_path=r"C:\P\WINWORD.EXE"))
+        self.assertEqual(code, 0)
+        self.assertIn("RESULT: OK", out)
+        self.assertIn("OK|Engine (.docx to .pdf)|Microsoft Word 16.0  (preferred)", out)
+        # The Word line itself is INFO: the contract line is the one that says
+        # what will actually run.
+        self.assertIn("INFO|Microsoft Word|Microsoft Word 16.0", out)
+        self.assertIn("probe: minimal .docx -> PDF", out)
+        self.assertEqual(err, "")
+
+    def test_a_machine_without_word_is_ok_through_libreoffice(self):
+        code, out, _, _ = self.run_check_con(_word(ok=False, ruta="", motivo="not installed"))
+        self.assertEqual(code, 0)
+        self.assertIn("RESULT: OK", out)
+        self.assertIn("INFO|Microsoft Word|not installed", out)
+        self.assertIn("OK|Engine (.docx to .pdf)|headless LibreOffice", out)
+        self.assertIn("Microsoft Word not usable: not installed", out)
+
+    def test_info_never_becomes_a_missing_tool(self):
+        _, out, _, _ = self.run_check_con(_word(ok=False, ruta="", motivo="not installed"))
+        missing = [line for line in out.splitlines() if line.startswith("MISSING")]
+        self.assertEqual(missing, [])
+        self.assertNotIn("MISSING: Microsoft Word", out)
+
+    def test_an_unprobed_word_is_never_described_as_probed(self):
+        # `--sin-sondeo` answers the cheap question, and the output has to say so
+        # instead of implying an export happened.
+        code, out, _, disponible = self.run_check_con(
+            _word(sondeado=False), env=_Env(word_path=r"C:\P\WINWORD.EXE"),
+            args=argparse.Namespace(sin_sondeo=True))
+        self.assertEqual(code, 0)
+        self.assertIn("not verified", out)
+        self.assertNotIn("probe:", out)
+        self.assertFalse(disponible.call_args.kwargs["probar"])
+        # Not probed, but found: `auto` still prefers it, and says why it knows.
+        self.assertIn("OK|Engine (.docx to .pdf)|Microsoft Word 16.0  (preferred)", out)
+
+    def test_recheck_motor_re_evaluates_the_cached_answer(self):
+        _, _, _, disponible = self.run_check_con(
+            _word(), env=_Env(word_path=r"C:\P\WINWORD.EXE"),
+            args=argparse.Namespace(recheck_motor=True))
+        self.assertTrue(disponible.call_args.kwargs["reevaluar"])
+
+    def test_no_engine_at_all_is_missing_and_says_both_reasons(self):
+        code, out, _, _ = self.run_check_con(
+            _word(ok=False, ruta="", motivo="not installed"),
+            env=_Env(word_path=None, soffice_path=None, soffice_candidates=[]))
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING|LibreOffice|", out)
+        self.assertIn("MISSING|Engine (.docx to .pdf)|no usable PDF engine", out)
+        self.assertIn("word: not installed", out)
+        self.assertIn("RESULT: MISSING", out)
+
+    def test_a_forced_engine_that_cannot_convert_is_never_replaced_by_the_other(self):
+        code, out, _, _ = self.run_check_con(
+            _word(ok=False, ruta="", motivo="installed but the Word.Application "
+                                            "automation class is not registered"),
+            env=_Env(word_path=r"C:\P\WINWORD.EXE"),
+            args=argparse.Namespace(motor="word"))
+        self.assertEqual(code, 1)
+        # LibreOffice IS usable here, and there is exactly one engine line: the
+        # MISSING one. An OK line would mean the wrong renderer produced it.
+        lineas = [l for l in out.splitlines() if "Engine (.docx to .pdf)|" in l]
+        self.assertEqual([l.split("|")[0] for l in lineas], ["MISSING"])
+        self.assertIn("--motor word is not usable here", lineas[0])
+        self.assertIn("rerun without --motor to fall back", lineas[0])
+        self.assertNotIn("RESULT: OK", out)
+
+    def test_an_unknown_engine_name_is_an_error_listing_the_valid_ones(self):
+        code, out, _, _ = self.run_check_con(
+            _word(ok=False, ruta="", motivo="not installed"),
+            args=argparse.Namespace(motor="openoffice"))
+        self.assertEqual(code, 1)
+        self.assertIn("unknown PDF engine", out)
+        self.assertIn("RESULT: MISSING", out)
+
+    def test_a_forced_libreoffice_never_asks_about_word(self):
+        code, out, _, disponible = self.run_check_con(
+            _word(), env=_Env(word_path=r"C:\P\WINWORD.EXE"),
+            args=argparse.Namespace(motor="libreoffice"))
+        self.assertEqual(code, 0)
+        self.assertIn("OK|Engine (.docx to .pdf)|headless LibreOffice", out)
+        self.assertNotIn("Microsoft Word", out)
+        disponible.assert_not_called()
 
 
 class TestContract(CheckHarness):
@@ -278,10 +393,23 @@ class TestExport(CheckHarness):
         self.docx.write_bytes(b"PK\x03\x04fake")
 
     def _args(self, **overrides):
+        # `motor` defaults to libreoffice HERE, on purpose: these tests are about
+        # the LibreOffice path, and `auto` would probe Microsoft Word for real on
+        # a machine that has it (launching Word once per test, and answering a
+        # question about the engine that is not what these cases are about).
+        # The engine selection itself is covered by TestSeleccionDeMotor.
         values = {"docx": str(self.docx), "outdir": str(self.dir / "out"),
-                  "log": None, "timeout": 300, "carpeta_trabajo": None}
+                  "log": None, "timeout": 300, "carpeta_trabajo": None,
+                  "motor": "libreoffice"}
         values.update(overrides)
         return argparse.Namespace(**values)
+
+    def _motor_libreoffice(self):
+        """Patch that pins the engine, so a test about LibreOffice cannot drift
+        onto Word just because the machine running the suite has it."""
+        motor = motores_mod.Motor(nombre=motores_mod.LIBREOFFICE, ok=True,
+                                  version="7.0", detalle="headless LibreOffice 7.0")
+        return mock.patch.object(apa7.motores_mod, "elegir", return_value=(motor, [motor]))
 
     def _export(self, soffice_result, **overrides):
         import argparse
@@ -298,7 +426,15 @@ class TestExport(CheckHarness):
 
         values = self._args(**overrides)
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
+        # Engine selection is mocked out: these cases are about the LibreOffice
+        # conversion mechanics, and letting `elegir` run would probe Word for
+        # real on a machine that has it, plus a --version call through the same
+        # fake the assertions below count.
+        motor = motores_mod.Motor(nombre=motores_mod.LIBREOFFICE, ok=True,
+                                  version="7.0", detalle="headless LibreOffice 7.0")
+        with mock.patch.object(apa7.motores_mod, "elegir",
+                               return_value=(motor, [motor])), \
+                mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
                 mock.patch.object(rutas, "kill_soffice_processes", return_value=0), \
                 mock.patch.object(rutas, "run_soffice", fake_run_soffice):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -397,7 +533,10 @@ class TestExport(CheckHarness):
             calls.append(("clean", perfil))
             return 0
 
-        with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
+        motor = motores_mod.Motor(nombre=motores_mod.LIBREOFFICE, ok=True,
+                                  version="7.0", detalle="headless LibreOffice 7.0")
+        with self._motor_libreoffice(), \
+                mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
                 mock.patch.object(rutas, "kill_soffice_processes", side_effect=fake_clean), \
                 mock.patch.object(rutas, "run_soffice", fake_run_soffice):
             with contextlib.redirect_stdout(io.StringIO()), \
@@ -420,7 +559,8 @@ class TestExport(CheckHarness):
             perfiles.append(perfil)
             return 0
 
-        with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
+        with self._motor_libreoffice(), \
+                mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
                 mock.patch.object(rutas, "kill_soffice_processes", side_effect=fake_clean), \
                 mock.patch.object(rutas, "run_soffice", fake_run_soffice):
             with contextlib.redirect_stdout(io.StringIO()), \
@@ -442,7 +582,8 @@ class TestExport(CheckHarness):
             perfiles.append(perfil)
             return 2
 
-        with mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
+        with self._motor_libreoffice(), \
+                mock.patch.object(rutas, "soffice_console", return_value="/usr/bin/soffice"), \
                 mock.patch.object(rutas, "kill_soffice_processes", side_effect=fake_clean), \
                 mock.patch.object(rutas, "run_soffice", fake_run_soffice):
             out, err = io.StringIO(), io.StringIO()
@@ -453,12 +594,16 @@ class TestExport(CheckHarness):
         self.assertIn("unsaved", err.getvalue())
 
     def test_a_missing_libreoffice_fails_before_running_anything(self):
+        # Exit code 2, not 1: nothing is wrong with the DOCUMENT, the machine is
+        # missing an engine. SKILL.md answers that one by asking the user whether
+        # to install, instead of failing the document.
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(rutas, "soffice_console", return_value=None), \
+        with mock.patch.object(apa7.motores_mod, "elegir", return_value=(None, [])), \
+                mock.patch.object(rutas, "soffice_console", return_value=None), \
                 mock.patch.object(rutas, "run_soffice") as run_soffice:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = apa7.cmd_export(self._args())
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertEqual(out.getvalue(), "")
         run_soffice.assert_not_called()
         self.assertIn("apa7.py install", err.getvalue())
@@ -497,9 +642,269 @@ class TestExport(CheckHarness):
         self.assertNotIn("ambiguous", err)
 
 
+_SIN_PORVEER = object()
+
+
+class TestBuildUnSoloMotor(unittest.TestCase):
+    """`build` decides the engine once and both passes must use that one.
+
+    Not a style rule: the two engines paginate differently, so measuring the
+    index pages with LibreOffice and delivering a Word-rendered PDF produces an
+    index whose numbers do not match the document. `build` therefore resolves
+    the engine itself and hands the NAME to the measuring export instead of
+    letting it choose again.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.manifest = self.dir / "MANIFEST.json"
+        self.manifest.write_text('{"opciones": {"toc_campos": true}}', encoding="utf-8")
+        self.docx = self.dir / "trabajo" / "doc.docx"
+        self.docx.parent.mkdir(parents=True, exist_ok=True)
+        self.word = motores_mod.Motor(nombre=motores_mod.WORD, ok=True, version="16.0",
+                                      detalle="Microsoft Word 16.0")
+
+    def _args(self, motor="auto"):
+        # `--motor` travels in `rest`, because `build` owns the option: it reads
+        # it from the forwarded list and strips it before build-docx.js sees it.
+        rest = ["--manifiesto", str(self.manifest), "--out", str(self.docx)]
+        if motor is not None:
+            rest += ["--motor", motor]
+        return argparse.Namespace(rest=rest, unknown=[], carpeta_trabajo=None)
+
+    def _run(self, motor="auto", elegido=_SIN_PORVEER, estados=_SIN_PORVEER, exporta=True,
+             segunda_pasada=0):
+        """Run cmd_build with node and both passes faked.
+
+        Returns (code, calls, elegir_mock, export_mock) where `calls` are the
+        argv lists handed to subprocess.call: pass 1, the page reader, pass 2.
+        The sentinel default matters: `elegido=None` means "no usable engine",
+        which is a case under test, not "caller did not say".
+        """
+        if elegido is _SIN_PORVEER:
+            elegido = self.word
+        if estados is _SIN_PORVEER:
+            estados = [elegido] if elegido is not None else [self.word]
+        calls = []
+
+        def fake_call(argv, *args, **kwargs):
+            argv = [str(a) for a in argv]
+            calls.append(argv)
+            if "paginas-de-pdf.py" in " ".join(argv):
+                # The page reader writes the map both passes depend on.
+                out = argv[argv.index("--out") + 1]
+                Path(out).write_text('{"pags": 1}', encoding="utf-8")
+                return 0
+            if "--paginas-json" in argv:
+                return segunda_pasada
+            # Pass 1: build-docx.js produces the .docx that pass 2 rebuilds.
+            out = argv[argv.index("--out") + 1]
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            Path(out).write_bytes(b"PK\x03\x04fake")
+            return 0
+
+        def fake_export(args):
+            # The measuring export writes the throwaway PDF that is read next.
+            if exporta:
+                destino = Path(args.outdir)
+                destino.mkdir(parents=True, exist_ok=True)
+                (destino / (self.docx.stem + ".pdf")).write_bytes(b"%PDF-1.7 fake")
+            return 0 if exporta else 2
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(rutas, "node_path", return_value="node"), \
+                mock.patch.object(rutas, "venv_python", return_value=r"C:\P\python.exe"), \
+                mock.patch.object(rutas, "python_works", return_value=True), \
+                mock.patch.object(apa7.subprocess, "call", side_effect=fake_call), \
+                mock.patch.object(apa7.motores_mod, "elegir",
+                                  return_value=(elegido, estados)) as elegir_mock, \
+                mock.patch.object(apa7, "cmd_export", side_effect=fake_export) as export_mock:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = apa7.cmd_build(self._args(motor))
+        self.err = err.getvalue()
+        return code, calls, elegir_mock, export_mock
+
+    def test_the_engine_is_resolved_exactly_once(self):
+        _, _, elegir_mock, _ = self._run(motor="auto")
+        self.assertEqual(elegir_mock.call_count, 1)
+
+    def test_the_resolved_name_is_pinned_for_the_measuring_export(self):
+        _, _, _, export_mock = self._run(motor="auto")
+        # `auto` resolved to Word, so the measuring export must be told Word --
+        # not left to choose again on a machine whose answer could differ.
+        self.assertEqual(export_mock.call_args.args[-1].motor, "word")
+
+    def test_an_explicit_engine_is_not_forwarded_to_build_docx(self):
+        _, calls, _, _ = self._run(motor="word")
+        for argv in calls:
+            self.assertNotIn("--motor", argv)
+        # Both passes are there: the build, the page reader, the rebuild.
+        self.assertEqual(len(calls), 3)
+
+    def test_both_passes_receive_the_same_arguments(self):
+        _, calls, _, _ = self._run(motor="word")
+        pass1, paginas, pass2 = calls
+        self.assertEqual(pass1[1:], pass2[1:-2])
+        self.assertIn("--paginas-json", pass2)
+        self.assertIn("paginas-de-pdf.py", paginas[1])
+
+    def test_a_forced_engine_that_cannot_convert_is_a_hard_error(self):
+        estado = word_motor.Estado(ok=False, motivo="not installed")
+        code, calls, _, export_mock = self._run(motor="word", elegido=None,
+                                                estados=[estado])
+        self.assertEqual(code, 2)
+        # Pass 1 already built the .docx, and that is kept: the file is not
+        # thrown away because the indexes could not be measured.
+        self.assertTrue(self.docx.is_file())
+        self.assertEqual(len(calls), 1)
+        export_mock.assert_not_called()
+        self.assertIn("--motor word cannot convert here: not installed", self.err)
+
+    def test_an_unknown_engine_name_is_rejected_before_any_pass(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(rutas, "node_path", return_value="node"), \
+                mock.patch.object(apa7.subprocess, "call") as call_mock:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = apa7.cmd_build(self._args(motor="writer"))
+        self.assertEqual(code, 2)
+        self.assertIn("word", err.getvalue())
+        call_mock.assert_not_called()
+
+    def test_auto_with_nothing_usable_keeps_the_first_build(self):
+        estado = word_motor.Estado(ok=False, motivo="not installed")
+        code, _, _, export_mock = self._run(motor="auto", elegido=None, estados=[estado])
+        # Not a failure: the document exists, the indexes ship without page
+        # numbers, and the rendering engine fills them in on open.
+        self.assertEqual(code, 0)
+        self.assertTrue(self.docx.is_file())
+        export_mock.assert_called_once()
+
+    def test_a_failed_measuring_export_keeps_the_first_build(self):
+        code, calls, _, _ = self._run(motor="word", exporta=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)  # no page reader, no second pass
+        self.assertTrue(self.docx.is_file())
+
+    def test_without_a_venv_the_indexes_simply_ship_unmeasured(self):
+        out, err = io.StringIO(), io.StringIO()
+        calls = []
+
+        def fake_call(argv, *a, **k):
+            calls.append([str(x) for x in argv])
+            if "--out" in calls[-1]:
+                Path(calls[-1][calls[-1].index("--out") + 1]).write_bytes(b"PK\x03\x04")
+            return 0
+
+        with mock.patch.object(rutas, "node_path", return_value="node"), \
+                mock.patch.object(rutas, "venv_python", return_value=None), \
+                mock.patch.object(apa7.subprocess, "call", side_effect=fake_call), \
+                mock.patch.object(apa7.motores_mod, "elegir",
+                                  return_value=(self.word, [self.word])):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = apa7.cmd_build(self._args(motor="word"))
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+
+
 class _ExportResult:
     def __init__(self, values):
         self.__dict__.update(values)
+
+
+class TestExportConWord(CheckHarness):
+    """The Word path of `export`, with the COM export itself faked.
+
+    stdout still carries the PDF path and nothing else, on this engine too: the
+    caller (SKILL.md) does not know or care which renderer ran.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.docx = self.dir / "doc.docx"
+        self.docx.write_bytes(b"PK\x03\x04fake")
+        self.motor = motores_mod.Motor(nombre=motores_mod.WORD, ok=True, version="16.0",
+                                       detalle="Microsoft Word 16.0")
+
+    def _args(self, **overrides):
+        values = {"docx": str(self.docx), "outdir": str(self.dir / "out"), "log": None,
+                  "timeout": 300, "carpeta_trabajo": None, "motor": "word"}
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def _export(self, resultado=None, **overrides):
+        """Run cmd_export against a Word engine. `resultado` is the fake Resultado."""
+        if resultado is None:
+            def exportar(docx, pdf, **kwargs):
+                Path(pdf).parent.mkdir(parents=True, exist_ok=True)
+                Path(pdf).write_bytes(b"%PDF-1.7 fake")
+                return word_motor.Resultado(exit_code=0, pdf_creado=True, version="16.0",
+                                             stdout="APA7-VERSION:16.0\nAPA7-PDF-OK\n",
+                                             log_dir=kwargs.get("log_dir"))
+        else:
+            def exportar(docx, pdf, **kwargs):
+                if resultado.pdf_creado:
+                    Path(pdf).parent.mkdir(parents=True, exist_ok=True)
+                    Path(pdf).write_bytes(b"%PDF-1.7 fake")
+                return resultado
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(apa7.motores_mod, "elegir",
+                               return_value=(self.motor, [self.motor])), \
+                mock.patch.object(apa7.word_motor, "exportar", side_effect=exportar) as exportar_mock:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = apa7.cmd_export(self._args(**overrides))
+        return code, out.getvalue(), err.getvalue(), exportar_mock
+
+    def test_a_successful_export_prints_only_the_pdf_path(self):
+        code, out, err, _ = self._export()
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), str(self.dir / "out" / "doc.pdf"))
+        self.assertIn("Running: Microsoft Word through COM", err)
+
+    def test_the_timeout_reaches_the_word_driver(self):
+        _, _, _, exportar_mock = self._export(timeout=42)
+        self.assertEqual(exportar_mock.call_args.kwargs["timeout"], 42)
+
+    def test_fields_are_updated_only_when_the_caller_asks(self):
+        _, _, _, sin_campos = self._export()
+        self.assertFalse(sin_campos.call_args.kwargs["actualizar_campos"])
+        _, _, _, con_campos = self._export(actualizar_campos=True)
+        self.assertTrue(con_campos.call_args.kwargs["actualizar_campos"])
+
+    def test_a_timeout_is_reported_as_a_timeout_not_as_a_missing_file(self):
+        resultado = word_motor.Resultado(exit_code=1, timed_out=True,
+                                         motivo="Microsoft Word did not finish")
+        code, out, err, _ = self._export(resultado)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("did not finish within 300 s", err)
+        self.assertIn("--timeout", err)
+
+    def test_a_word_that_will_not_convert_reports_its_reason(self):
+        resultado = word_motor.Resultado(
+            exit_code=1, motivo="Microsoft Word is already open (PID 1234)")
+        code, out, err, _ = self._export(resultado)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("Word did not produce the PDF", err)
+        self.assertIn("already open (PID 1234)", err)
+
+    def test_benign_driver_noise_is_reported_as_ignored(self):
+        resultado = word_motor.Resultado(exit_code=0, pdf_creado=True, version="16.0",
+                                         stderr="The service is not running")
+        code, _, err, _ = self._export(resultado)
+        self.assertEqual(code, 0)
+        self.assertIn("stderr with", err)
+
+    def test_the_word_log_is_kept_next_to_the_document(self):
+        _, _, _, exportar_mock = self._export()
+        log_dir = exportar_mock.call_args.kwargs["log_dir"]
+        self.assertTrue(log_dir)
         self.stderr = self.__dict__.get("stderr", "")
         self.stdout = self.__dict__.get("stdout", "")
 

@@ -646,13 +646,46 @@ def verificar(args):
     # They are still reported so the reader knows what the machine really used.
     # Anything else stays a failure, because with different metrics the line
     # advance measured in check 12 no longer means anything.
-    fuentes = set()
+    #
+    # A font that carries NO visible text is not judged. Microsoft Word stamps
+    # its own default (Aptos) on the blank runs that separate the entries of a
+    # TOC field it regenerates on export; those glyphs are spaces, they are
+    # invisible, and rejecting them made every Word-rendered PDF fail this check
+    # while nothing visible was wrong. They are still reported, so the reader can
+    # see that the font was embedded and that it drew nothing.
+    #
+    # What gets judged is the TEXT LAYER, not the font table: the question this
+    # check answers is which typeface drew something the reader can see. The
+    # embedded list is still reported, because a reader who opens the file and
+    # finds a font in it deserves to know. Joining the two by name was tried and
+    # is not reliable: get_fonts() returns the PostScript name ("BCDGEE+Aptos")
+    # and the span returns its own ("AptosMT"), and for a font embedded from a
+    # TTF they differ again ("Arial Regular" vs "ArialMT"), so every typeface
+    # looked textless and nothing was ever checked.
+    #
+    # Both tallies are per DOCUMENT and not per page on purpose: a subset that
+    # draws spaces on one page and text on another is a text font.
+    def sin_prefijo(nombre):
+        return nombre.split("+", 1)[-1]
+
+    embebidas = set()
+    dibujadas = set()
     for i in range(total):
         for f in doc[i].get_fonts(full=False):
-            fuentes.add(f[3] if len(f) > 3 else str(f))
+            embebidas.add(f[3] if len(f) > 3 else str(f))
+        for bloque in doc[i].get_text("dict").get("blocks", []):
+            for linea in bloque.get("lines", []):
+                for span in linea.get("spans", []):
+                    if (span.get("text") or "").strip():
+                        dibujadas.add(span.get("font") or "")
 
-    declaradas, sustituciones, rechazadas = fuentes_mod.particiona(sorted(fuentes))
-    detalle = "fonts: %s" % (", ".join(fuentes) if fuentes else "none")
+    declaradas, sustituciones, rechazadas = fuentes_mod.particiona(
+        sorted(dibujadas))
+    detalle = "fonts: %s" % (", ".join(sorted(embebidas)) if embebidas else "none")
+    sin_texto = sorted(n for n in embebidas
+                       if sin_prefijo(n) not in {sin_prefijo(d) for d in dibujadas})
+    if sin_texto:
+        detalle += ("  -> no visible text (not judged): %s" % ", ".join(sin_texto))
     if sustituciones:
         detalle += ("  -> metric-compatible substitute for Times New Roman: %s"
                     % ", ".join(sustituciones))
@@ -823,7 +856,7 @@ def verificar(args):
             "; ".join(detalle_notas) if detalle_notas
             else "%d table(s) with note verified below the label" % len(Mobj.get("tablas", [])))
 
-    # Figures are checked geometrically further down (note above the image).
+    # Figures are checked geometrically further down (note below the image).
     # Here we only warn if the manifest declares no note.
     fig_sin_nota = [f["indice"] for f in Mobj.get("figuras", []) if not f.get("nota")]
     if fig_sin_nota:
@@ -833,14 +866,30 @@ def verificar(args):
         R.anota("The manifest declares a note for each figure", True,
                 "%d figure(s)" % len(Mobj.get("figuras", [])))
 
-    # --- 14. Figure note position (above the image) ----------
+    # --- 14. Figure note position (below the image) ----------
     # Searching the note by text does NOT work: several figures usually share the
     # same default note ("Elaboracion propia"), so a text search always returns
     # the first one and flags all the others as errors. The GEOMETRY must be
-    # compared: the general note of the figure is the "Nota." text block that
-    # lies ABOVE (lower y) the image, on the same page.
-    sin_nota_encima = []
+    # compared: the note of a figure is the "Nota." text block that lies BELOW
+    # (higher y) its image, on the same page. The number and the title go above
+    # the image and the note below it, which is what APA 7 asks for and what
+    # build-docx.js emits.
+    #
+    # A note that fell to the NEXT page is accepted, and named in the detail: an
+    # image that fills the page pushes its note over. It is not an error, but it
+    # is also not reported as a clean pass, because the note is no longer glued
+    # to its figure.
+    sin_nota_debajo = []
+    notas_continuadas = []
     paginas_con_foto = 0
+
+    def bloques_de_notas(pagina):
+        if pagina >= len(bloques):
+            return []
+        return [b for b in bloques[pagina]
+                if len(b) >= 5 and isinstance(b[4], str)
+                and re.match(r"^Nota\.\s", b[4].strip())]
+
     for i in range(CUERPO, total):
         rects_imagen = []
         for img in doc[i].get_images(full=True):
@@ -852,25 +901,34 @@ def verificar(args):
         # must be inspected, not norm(), because norm() strips the punctuation and
         # "Nota." would become "nota" (and the prefix with the dot would never
         # match).
-        bs = [b for b in bloques[i] if len(b) >= 5 and isinstance(b[4], str) and b[4].strip()]
-        notas = [b for b in bs if re.match(r"^Nota\.\s", b[4].strip())]
+        notas = bloques_de_notas(i)
         for r in rects_imagen:
-            # The bottom edge of the note block must lie above (or exactly at
-            # the top edge of) the image.
-            if not [b for b in notas if b[3] <= r.y0 + 4]:
-                sin_nota_encima.append("p. %d: image at y0=%.0f with no note above"
-                                       % (i + 1, r.y0))
+            # The top edge of the note block must lie below (or exactly at the
+            # bottom edge of) the image.
+            if [b for b in notas if b[1] >= r.y1 - 4]:
+                continue
+            # Otherwise, the top of the following page, which is where a note
+            # that did not fit ends up.
+            arriba = [b for b in bloques_de_notas(i + 1) if b[1] <= PT_PULGADA * 1.8]
+            if arriba:
+                notas_continuadas.append("p. %d: note on page %d" % (i + 1, i + 2))
+                continue
+            sin_nota_debajo.append("p. %d: image at y1=%.0f with no note below"
+                                   % (i + 1, r.y1))
 
     if paginas_con_foto == 0:
-        R.anota("Figure notes go above the image", True,
+        R.anota("Figure notes go below the image", True,
                 "the document has no images: not applicable", critico=False)
-    elif sin_nota_encima:
-        R.anota("Figure notes go above the image", False,
-                "%d image(s) with no note above: %s"
-                % (len(sin_nota_encima), "; ".join(sin_nota_encima[:3])), critico=False)
+    elif sin_nota_debajo:
+        R.anota("Figure notes go below the image", False,
+                "%d image(s) with no note below: %s"
+                % (len(sin_nota_debajo), "; ".join(sin_nota_debajo[:3])), critico=False)
     else:
-        R.anota("Figure notes go above the image", True,
-                "%d page(s) with an image, all with a note above" % paginas_con_foto)
+        detalle = "%d page(s) with an image, all with a note below" % paginas_con_foto
+        if notas_continuadas:
+            detalle += "; %d note(s) fell to the next page: %s" % (
+                len(notas_continuadas), "; ".join(notas_continuadas[:3]))
+        R.anota("Figure notes go below the image", True, detalle)
 
     # --- 15. Figure image geometry (CRITICAL) ---------------------------
     # A missing `lineRule` in the paragraph that holds an image makes the text

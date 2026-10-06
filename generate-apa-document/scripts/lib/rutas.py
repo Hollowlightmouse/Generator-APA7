@@ -22,6 +22,7 @@ location, from PATH, or from the default install locations of the detected OS.
 Supported environment variables (all optional):
     APA7_SKILL_ROOT  skill root
     APA7_SOFFICE     path to the LibreOffice executable
+    APA7_WORD        path to the Microsoft Word executable
     APA7_PYTHON      path to the Python interpreter that has pymupdf
     APA7_WORKDIR     working directory (where node_modules/docx lives)
     APA7_NODEDIR     directory that contains node_modules/docx
@@ -484,6 +485,10 @@ def log(message):
 
 
 def _remove_tree(path):
+    # Path(), not path.exists(): this is the one tree deleter in the module and
+    # every other function here accepts a plain string, so a caller passing one
+    # must not get an AttributeError instead of a deletion.
+    path = Path(path)
     if path.exists():
         shutil.rmtree(str(path), ignore_errors=True)
 
@@ -897,6 +902,125 @@ def filter_stderr(stderr):
             continue
         real.append(stripped)
     return real
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Word: where it is, and whether the user is using it right now
+# ---------------------------------------------------------------------------
+# Word has no command line that converts a document, so the engine drives it
+# through COM (lib/word.py). What is answerable HERE is only the cheap half of
+# the question: does an executable exist, and does the machine know the COM
+# class. Whether Word can really produce a PDF is a question only an export can
+# answer, which is what the viability probe in lib/word.py is for.
+def word_candidates():
+    """Every path that could be the Microsoft Word executable, most likely first."""
+    candidates = []
+
+    override = os.environ.get("APA7_WORD")
+    if override:
+        candidates.append(override)
+
+    if is_windows():
+        # PATH first, because a portable or relocated install puts it there and
+        # that answer is the one the user's own PATH agrees with.
+        for name in ("winword.exe", "WINWORD.EXE"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+        # Then the installed layouts. Click-to-Run nests the suite under a
+        # versioned folder (Office16 today, Office15/Office14 on older machines),
+        # which is why the version is a glob and not a literal.
+        for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+            base = os.environ.get(variable)
+            if not base or not Path(base).is_dir():
+                continue
+            office = Path(base) / "Microsoft Office"
+            candidates.append(str(office / "root" / "Office16" / "WINWORD.EXE"))
+            if office.is_dir():
+                candidates.extend(
+                    str(path) for path in sorted(office.glob("root/Office*/WINWORD.EXE")))
+    elif is_macos():
+        candidates.append("/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word")
+        home = os.environ.get("HOME")
+        if home:
+            candidates.append(str(Path(home) / "Applications" / "Microsoft Word.app"
+                                   / "Contents" / "MacOS" / "Microsoft Word"))
+    return candidates
+
+
+def word_path():
+    """Path of the Word executable, or None when it is not installed."""
+    for candidate in word_candidates():
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return None
+
+
+_WORD_PROGID_PATH = "Registry::HKEY_CLASSES_ROOT\\Word.Application"
+
+
+def word_clase_registrada():
+    """True/False for "this machine knows Word.Application", None when unknown.
+
+    The registry is asked instead of `New-Object -ComObject Word.Application`
+    because instantiating the class LAUNCHES Word: this is the check that makes
+    `check` cheap, and the real proof is the export probe.
+    """
+    if is_macos():
+        # Nothing equivalent to read without launching it; the bundle existing is
+        # the strongest cheap signal there is on macOS.
+        return True if word_path() else False
+    if not is_windows():
+        return None
+
+    result = run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                  "if (Test-Path '%s') { 'yes' } else { 'no' }" % _WORD_PROGID_PATH],
+                 timeout=30)
+    if result.exit_code != 0:
+        return None
+    return result.first_line.strip().lower().startswith("y")
+
+
+def word_pids():
+    """PIDs of the Microsoft Word processes running right now ([] when none).
+
+    This exists for one safety rule: Word is a single-instance COM server, so
+    `New-Object -ComObject Word.Application` hands back the ALREADY RUNNING
+    instance when there is one. Quitting that object would close the user's open
+    documents, so the engine refuses to run at all while Word is open.
+    """
+    pids = []
+
+    if is_windows():
+        result = run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                      "(Get-Process -Name WINWORD -ErrorAction SilentlyContinue) | "
+                      "ForEach-Object { $_.Id.ToString() }"], timeout=30)
+        if result.exit_code != 0:
+            return pids
+        for line in result.output:
+            line = line.strip()
+            if line.isdigit() and int(line) != os.getpid():
+                pids.append(int(line))
+        return pids
+
+    if is_macos():
+        result = run(["pgrep", "-x", "Microsoft Word"], timeout=30)
+        if result.exit_code == 0:
+            for line in result.output:
+                line = line.strip()
+                if line.isdigit() and int(line) != os.getpid():
+                    pids.append(int(line))
+    return pids
+
+
+def word_ya_abierta():
+    """True when the user has Microsoft Word open right now."""
+    return bool(word_pids())
+
+
+def dry_run():
+    """True while `install --dry-run` is running (process-wide)."""
+    return _DRY_RUN
 
 
 # ---------------------------------------------------------------------------

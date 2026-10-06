@@ -8,7 +8,7 @@ so it cannot depend on a third-party package or on a newer interpreter.
 
 Subcommands
     check     preflight (STEP 0): every required tool, one line per tool
-    export    .docx -> .pdf with headless LibreOffice
+    export    .docx -> .pdf with Microsoft Word or headless LibreOffice
     install   install whatever is missing
     parse     .md + layout JSON -> MANIFEST.json
     build     MANIFEST.json -> .docx
@@ -31,8 +31,17 @@ Output contract
     and sent the pipeline down an install that had nothing to do. INFO lines
     never affect RESULT nor the exit code.
 
+The PDF engine
+    `--motor auto|word|libreoffice`. `auto` (the default) uses Microsoft Word
+    when a probe proves it can really export here, and headless LibreOffice
+    otherwise. Word is preferred because it renders the document the way Word
+    itself will display it, which is what makes page-by-page verification
+    meaningful. Naming an engine that is not usable is an ERROR (exit code 2):
+    an explicit request is never answered with a different renderer.
+
 Optional environment variables
-    APA7_SOFFICE, APA7_PYTHON, APA7_NODEDIR, APA7_WORKDIR, APA7_SKILL_ROOT
+    APA7_SOFFICE, APA7_WORD, APA7_PYTHON, APA7_NODEDIR, APA7_WORKDIR,
+    APA7_SKILL_ROOT
 """
 
 import argparse
@@ -49,7 +58,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lib import instalador  # noqa: E402
+from lib import motores as motores_mod  # noqa: E402
 from lib import rutas  # noqa: E402
+from lib import word as word_motor  # noqa: E402
 
 _FLOOR = "%d.%d" % rutas.MIN_PYTHON
 _FLOOR_TUPLE = "(%d, %d)" % rutas.MIN_PYTHON
@@ -69,13 +80,18 @@ _PY_PROBE = (
 # ---------------------------------------------------------------------------
 # check
 # ---------------------------------------------------------------------------
-def cmd_check(_args):
+def cmd_check(args=None):
     """Preflight (STEP 0).
 
     Every line goes to stdout because this output is the contract the skill
     parses; nothing human-facing is mixed in, so `RESULT:` can be read without
     having to filter noise out of the stream.
+
+    `args` is the parsed namespace when the CLI called this, and None when the
+    installer called it. Everything read from it is optional and defaults to the
+    documented behaviour, so `check` on its own needs no flags at all.
     """
+    args = args or argparse.Namespace()
     results = []
 
     def report(ok, tool, detail):
@@ -177,29 +193,58 @@ def cmd_check(_args):
             note = "  [MISMATCH: pinned %s]" % rutas.DEPS["docx"]
         report(ok, "docx (npm)", "v%s%s  (%s)" % (version or "?", note, node_dir))
 
-    # --- LibreOffice (the single PDF engine) ---------------------------------
-    # The version is always queried through run_soffice, never by calling the
-    # launcher directly: soffice.exe detaches, the child inherits the output pipe
-    # and the caller waits forever. That hangs the whole preflight.
-    soffice = rutas.soffice_path()
-    if not soffice:
-        searched = " | ".join(p for p in rutas.soffice_candidates() if p)
-        report(False, "LibreOffice", "not found. Searched: %s"
-               % (searched or "(no candidates: set APA7_SOFFICE)"))
-    else:
-        try:
-            probed = rutas.run_soffice(["--version"], timeout=60)
-        except rutas.SofficeNotFound as exc:
-            report(False, "LibreOffice", str(exc))
+    # --- PDF engine: Microsoft Word first, headless LibreOffice as backup -----
+    # Both engines are reported, and then ONE line says which one will actually
+    # be used. "Word is installed" is not the question: what matters is whether it
+    # can really export here, which only a probe can answer, so `check` probes
+    # (cached afterwards) instead of trusting a file lookup.
+    #
+    # `auto` does not probe during --dry-run: a dry run promises to create
+    # nothing and launch nothing, and the probe launches Word.
+    sondear_word = not (getattr(args, "sin_sondeo", False) or rutas.dry_run())
+    try:
+        pedido = motores_mod.normaliza(getattr(args, "motor", "auto"))
+    except ValueError as exc:
+        pedido = "auto"
+        report(False, "Engine (.docx to .pdf)", str(exc))
+
+    motor_elegido, estados = motores_mod.elegir(
+        pedido,
+        probar_word=sondear_word,
+        timeout=motores_mod.word_motor.TIMEOUT_SONDEO,
+        reevaluar=bool(getattr(args, "recheck_motor", False)),
+    )
+
+    for estado in estados:
+        if estado.ok:
+            inform("Microsoft Word" if estado.nombre == motores_mod.WORD else "LibreOffice",
+                   estado.detalle)
+        elif estado.nombre == motores_mod.WORD:
+            # INFO, not MISSING: a machine without Word is a machine with a
+            # perfectly good pipeline, as long as the other engine answers.
+            inform("Microsoft Word", estado.motivo)
         else:
-            first = ""
-            for line in (probed.stdout or "").replace("\r\n", "\n").split("\n"):
-                if line.strip():
-                    first = line.strip()
-                    break
-            ok = probed.exit_code == 0 and bool(first)
-            detail = first if ok else "could not read the version (exit code %d)" % probed.exit_code
-            report(ok, "LibreOffice", "%s  (%s)" % (detail, soffice))
+            report(False, "LibreOffice", estado.motivo)
+
+    if motor_elegido is not None:
+        # The reason belongs to the engine that was actually evaluated. Saying
+        # "Microsoft Word not usable: " (with nothing after it) because the
+        # user asked for LibreOffice and LibreOffice answered would be noise
+        # that also implies Word was even looked at.
+        nota = ""
+        if motor_elegido.nombre == motores_mod.WORD:
+            nota = "  (preferred)"
+        elif estados and estados[0].nombre == motores_mod.WORD:
+            nota = "  (Microsoft Word not usable: %s)" % estados[0].motivo
+        report(True, "Engine (.docx to .pdf)", "%s%s" % (motor_elegido.etiqueta(), nota))
+    elif pedido != "auto":
+        report(False, "Engine (.docx to .pdf)",
+               "--motor %s is not usable here: %s. Nothing else was used on purpose: "
+               "rerun without --motor to fall back to the other engine, or install this one."
+               % (pedido, estados[0].motivo if estados else "unknown"))
+    else:
+        report(False, "Engine (.docx to .pdf)", "no usable PDF engine: %s"
+               % "; ".join("%s: %s" % (e.nombre, e.motivo) for e in estados))
 
     # --- Package manager (only `install` needs this) -------------------------
     manager = rutas.package_manager()
@@ -256,19 +301,132 @@ def _docx_a_exportar(docx, carpeta):
                          ", ".join(p.name for p in encontrados)))
 
 
+def _exportar_con_word(docx, expected, args, log_dir, step):
+    """Export with Microsoft Word. Returns `(code, None)`.
+
+    `--actualizar-campos` is what makes Word recompute the TOC before exporting.
+    Without it the fields Word cached at build time are exported as they are,
+    which is faster and keeps the pagination stable; with it, the page numbers
+    in the index are Word's own. Neither is wrong, so it is the caller's choice
+    and never a silent default in one direction or the other.
+    """
+    actualizar = bool(getattr(args, "actualizar_campos", False))
+    step("Running: Microsoft Word through COM%s"
+         % (" (fields updated first)" if actualizar else ""))
+    resultado = word_motor.exportar(
+        docx, expected,
+        timeout=getattr(args, "timeout", word_motor.TIMEOUT_EXPORTACION),
+        actualizar_campos=actualizar,
+        log_dir=str(log_dir),
+    )
+
+    if resultado.stdout and resultado.stdout.strip():
+        step("stdout: %s" % " ".join(resultado.stdout.split()))
+    real = rutas.filter_stderr(resultado.stderr)
+    if resultado.stderr:
+        if not real:
+            step("stderr: only benign Word driver noise (ignored)")
+        else:
+            step("stderr with %d real line(s):" % len(real), "WARN")
+            for line in real:
+                step("  " + line, "WARN")
+
+    if resultado.timed_out:
+        step("Microsoft Word did not finish within %d s and was stopped (exit code 124)."
+             % getattr(args, "timeout", word_motor.TIMEOUT_EXPORTACION), "FAIL")
+        step("The conversion was aborted, not failed silently. Raise --timeout and retry.",
+             "FAIL")
+        return 1, None
+
+    if resultado.pdf_creado and expected.is_file():
+        return 0, None
+
+    step("Word did not produce the PDF: %s" % (resultado.motivo or "unknown error"), "FAIL")
+    return 1, None
+
+
+def _exportar_con_libreoffice(docx, expected, args, log_dir, step):
+    """Export with headless LibreOffice. Returns `(code, soffice_result)`.
+
+    The SofficeResult is handed back so the caller can delete the isolated
+    profile the run created, which is the only part of it worth deleting.
+    """
+    if getattr(args, "cerrar_libreoffice", False):
+        ajenos = rutas.kill_soffice_processes()
+        step("--cerrar-libreoffice: closed %d LibreOffice process(es). Any "
+             "open document with unsaved changes has been lost." % ajenos, "WARN")
+    else:
+        # Only our own runs (isolated `lo_profile`), never the user's.
+        leftovers = rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
+        if leftovers:
+            step("Cleaned up %d leftover LibreOffice process(es) from an interrupted run"
+                 % leftovers)
+
+    if expected.exists():
+        expected.unlink()
+
+    arguments = ["--convert-to", "pdf:writer_pdf_Export", "--outdir", str(expected.parent),
+                 str(docx)]
+    step("Running: soffice %s" % " ".join(arguments))
+    try:
+        result = rutas.run_soffice(arguments, timeout=args.timeout, log_dir=str(log_dir))
+    except rutas.SofficeNotFound as exc:
+        step(str(exc), "FAIL")
+        return 1, None
+
+    step("soffice finished with code %d" % result.exit_code)
+    if result.stdout and result.stdout.strip():
+        step("stdout: %s" % " ".join(result.stdout.split()))
+    real = rutas.filter_stderr(result.stderr)
+    if result.stderr:
+        if not real:
+            step("stderr: only benign LibreOffice noise (ignored)")
+        else:
+            step("stderr with %d real line(s):" % len(real), "WARN")
+            for line in real:
+                step("  " + line, "WARN")
+
+    if result.timed_out:
+        step("LibreOffice did not finish within %d s and was killed (exit code 124)."
+             % args.timeout, "FAIL")
+        step("The conversion was aborted, not failed silently. Raise --timeout, or "
+             "check whether a previous soffice process is stuck, and retry.", "FAIL")
+        killed = rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
+        if killed:
+            step("Killed %d leftover LibreOffice process(es) from the aborted run." % killed,
+                 "WARN")
+        return 1, result
+
+    if not expected.is_file():
+        step("The expected PDF was not produced: %s" % expected, "FAIL")
+        return 1, result
+
+    return 0, result
+
+
 def cmd_export(args):
-    """.docx -> .pdf with headless LibreOffice (the single engine).
+    """.docx -> .pdf with Microsoft Word or with headless LibreOffice.
 
     Progress goes to stderr and the resulting PDF path goes to stdout, so the
     caller can use it without having to parse a log. Both are also written to
     the log file.
 
+    `--motor auto|word|libreoffice` picks the engine (see lib/motores.py). Exit
+    code 2 means "no usable engine": the environment is missing something, not
+    the document, and SKILL.md answers that one by asking the user before
+    installing. A named engine that is not usable also exits 2, and never falls
+    back to the other one.
+
     `--docx` may be omitted: the only `.docx` of the working folder (or of the
     current folder) is then exported, and zero or several are reported as
     ambiguous instead of being guessed.
 
-    Three details that are not optional:
+    Four details that are not optional:
 
+    * Word is refused while the USER has Word open. Word is a single-instance COM
+      server, so attaching to their session would mean quitting it afterwards,
+      closing whatever they had open. The engine therefore never touches a Word
+      it did not start.
     * An ISOLATED LibreOffice profile is used on every run (inside run_soffice).
       With the real profile, an already-open LibreOffice makes the conversion
       hang silently. Because of that isolation, an open LibreOffice of the user
@@ -278,9 +436,9 @@ def cmd_export(args):
       --convert-to fail or hang, with no message explaining why, but killing the
       user's LibreOffice (with unsaved documents) is not the fix. The explicit
       `--cerrar-libreoffice` does close everything, and says so.
-    * A timeout is reported BEFORE asking whether the PDF exists. A wedged
-      LibreOffice would otherwise be diagnosed as a missing output file, which
-      is a different problem with a different fix.
+    * A timeout is reported BEFORE asking whether the PDF exists. A wedged engine
+      would otherwise be diagnosed as a missing output file, which is a different
+      problem with a different fix.
     """
     lines = []
 
@@ -291,6 +449,7 @@ def cmd_export(args):
     code = 1
     result = None
     log_file = None
+    motor_nombre = None
 
     try:
         docx, nota, error = _docx_a_exportar(
@@ -324,76 +483,58 @@ def cmd_export(args):
 
         expected = out_dir / (docx.stem + ".pdf")
 
-        step("=== PHASE 3: export to PDF with LibreOffice ===")
+        # --- The engine --------------------------------------------------------
+        pedido = getattr(args, "motor", None) or "auto"
+        try:
+            pedido = motores_mod.normaliza(pedido)
+        except ValueError as exc:
+            step(str(exc), "FAIL")
+            return 2
+
+        motor, estados = motores_mod.elegir(
+            pedido, timeout=word_motor.TIMEOUT_SONDEO)
+        for estado in estados:
+            if estado.ok:
+                step("%s: %s" % (estado.nombre, estado.detalle))
+            else:
+                step("%s not usable: %s" % (estado.nombre, estado.motivo), "WARN")
+
+        if motor is None:
+            if pedido != "auto":
+                step("The engine you asked for (--motor %s) cannot convert here: %s"
+                     % (pedido, estados[0].motivo if estados else "unknown"), "FAIL")
+                step("Nothing else was used on purpose. Rerun without --motor to fall "
+                     "back automatically, or install this engine: %s"
+                     % rutas.comando_apa7("install", "--only", pedido), "FAIL")
+            else:
+                step("No usable PDF engine on this machine:", "FAIL")
+                for estado in estados:
+                    step("  %s: %s" % (estado.nombre, estado.motivo), "FAIL")
+                step("Run: %s" % rutas.comando_apa7("install"), "FAIL")
+                step("Word is installed by hand; `install` only sets up LibreOffice. "
+                     "Ask the user which one to use.", "FAIL")
+            return 2
+
+        step("=== PHASE 3: export to PDF with %s ===" % motor.etiqueta())
         step("Skill root      : %s" % rutas.skill_root())
         step("Workdir         : %s" % rutas.workdir())
+        step("Engine          : %s" % motor.nombre)
         step("Input (.docx)   : %s" % docx)
         step("Expected output : %s" % expected)
 
-        if not rutas.soffice_console():
-            step("LibreOffice is not installed. Run: %s"
-                 % rutas.comando_apa7("install"), "FAIL")
-            return 1
-
-        if getattr(args, "cerrar_libreoffice", False):
-            ajenos = rutas.kill_soffice_processes()
-            step("--cerrar-libreoffice: closed %d LibreOffice process(es). Any "
-                 "open document with unsaved changes has been lost." % ajenos,
-                 "WARN")
-        else:
-            # Only our own runs (isolated `lo_profile`), never the user's.
-            leftovers = rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
-            if leftovers:
-                step("Cleaned up %d leftover LibreOffice process(es) from an "
-                     "interrupted run" % leftovers)
-
-        if expected.exists():
-            expected.unlink()
-
-        arguments = ["--convert-to", "pdf:writer_pdf_Export", "--outdir", str(out_dir), str(docx)]
-        step("Running: soffice %s" % " ".join(arguments))
-
         started = time.time()
-        try:
-            result = rutas.run_soffice(arguments, timeout=args.timeout, log_dir=str(log_dir))
-        except rutas.SofficeNotFound as exc:
-            step(str(exc), "FAIL")
-            return 1
+        motor_nombre = motor.nombre
+        if motor.nombre == motores_mod.WORD:
+            code, _ = _exportar_con_word(docx, expected, args, log_dir, step)
+        else:
+            code, result = _exportar_con_libreoffice(docx, expected, args, log_dir, step)
         elapsed = time.time() - started
-
-        step("soffice finished with code %d in %.1f s" % (result.exit_code, elapsed))
-
-        if result.stdout and result.stdout.strip():
-            step("stdout: %s" % " ".join(result.stdout.split()))
-        real = rutas.filter_stderr(result.stderr)
-        if result.stderr:
-            if not real:
-                step("stderr: only benign LibreOffice noise (ignored)")
-            else:
-                step("stderr with %d real line(s):" % len(real), "WARN")
-                for line in real:
-                    step("  " + line, "WARN")
-
-        if result.timed_out:
-            step("LibreOffice did not finish within %d s and was killed (exit code 124)."
-                 % args.timeout, "FAIL")
-            step("The conversion was aborted, not failed silently. Raise --timeout, or "
-                 "check whether a previous soffice process is stuck, and retry.", "FAIL")
-            killed = rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
-            if killed:
-                step("Killed %d leftover LibreOffice process(es) from the aborted run." % killed,
-                     "WARN")
-            return 1
-
-        if not expected.is_file():
-            step("The expected PDF was not produced: %s" % expected, "FAIL")
-            return 1
-
-        step("PDF generated: %s (%d bytes)" % (expected, expected.stat().st_size))
-        # The only thing on stdout: the caller gets the artifact, not a log.
-        sys.stdout.write("%s\n" % expected)
-        code = 0
-        return 0
+        step("Engine finished with code %d in %.1f s" % (code, elapsed))
+        if code == 0:
+            step("PDF generated: %s (%d bytes)" % (expected, expected.stat().st_size))
+            # The only thing on stdout: the caller gets the artifact, not a log.
+            sys.stdout.write("%s\n" % expected)
+        return code
 
     except KeyboardInterrupt:
         step("Interrupted.", "WARN")
@@ -406,12 +547,22 @@ def cmd_export(args):
         # launcher, because a surviving soffice.bin makes the NEXT --convert-to
         # fail. The user's LibreOffice is not ours to close (see
         # --cerrar-libreoffice).
-        rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
+        #
+        # Only when LibreOffice was the engine that ran. On the Word path there
+        # is nothing of ours to reap, and querying soffice processes there costs
+        # a shell-out per export; it would also kill an in-flight conversion of
+        # a *concurrent* apa7 run, which shares the profile name. Leftovers from
+        # an interrupted run are reaped by _exportar_con_libreoffice, before the
+        # next conversion, which is where they actually do damage.
+        if motor_nombre == motores_mod.LIBREOFFICE:
+            rutas.kill_soffice_processes(rutas.SOFFICE_PROFILE_NAME)
 
         # The isolated profile is thousands of files. It is only useful during
         # the conversion, so it is always removed; the .log files are kept
         # because they are the useful diagnostics.
-        if result is not None and result.profile_path:
+        # getattr, not isinstance: what is needed is only the path of the profile
+        # the run created, and the Word path has no profile at all.
+        if getattr(result, "profile_path", None):
             profile = Path(result.profile_path)
             if profile.is_dir():
                 if rutas.remove_tree(profile):
@@ -738,23 +889,42 @@ def _cmd_install(args):
         else:
             step("pymupdf present: %s" % probed.first_line)
 
-    # --- 5. LibreOffice ------------------------------------------------------
+    # --- 5. LibreOffice (only if nothing else can make a PDF) -----------------
+    # Word is not installable from here (it is a licensed desktop product the
+    # user installs by hand), so when Word is proven to work, the engine exists
+    # and installing a second, much larger one is work nobody asked for.
+    #
+    # `--only libreoffice` still installs it: asking for it by name is exactly
+    # the case where the user wants it whatever else answers.
     if rutas.soffice_path():
         step("LibreOffice present.")
     elif not wants("libreoffice"):
         step("LibreOffice is missing and --only excludes it: skipping.")
     else:
-        if _confirm("Install LibreOffice", args.yes, args.dry_run):
-            step("Installing LibreOffice (this can take several minutes)...")
-            if _run_install(instalador.build(manager, "libreoffice"),
-                            timeout=3600) != 0 or not rutas.soffice_path():
-                sys.stderr.write("FAILED: LibreOffice not found after installation.\n")
-                sys.stderr.write("Paths examined: %s\n"
-                                 % " | ".join(p for p in rutas.soffice_candidates() if p))
-                sys.stderr.write("If it is installed elsewhere, set APA7_SOFFICE "
-                                 "to the full path.\n")
-                return 1
-            step("LibreOffice installed: %s" % rutas.soffice_path())
+        # --only libreoffice is an explicit order, and it outranks the shortcut
+        # below: if the answer to an explicit request were "you do not need it",
+        # the flag would be unusable.
+        pedido_explicito = "libreoffice" in (getattr(args, "only", None) or [])
+        estado_word = motores_mod.estado_word(probar=not args.dry_run)
+        if estado_word.ok and not pedido_explicito:
+            step("LibreOffice missing, but %s already converts .docx to .pdf: skipping "
+                 "the LibreOffice installation. Use --only libreoffice to install it anyway."
+                 % estado_word.etiqueta())
+        else:
+            if estado_word.sondeado and estado_word.motivo:
+                step("Microsoft Word is installed but not usable (%s), so LibreOffice "
+                     "is the engine that will be used." % estado_word.motivo)
+            if _confirm("Install LibreOffice", args.yes, args.dry_run):
+                step("Installing LibreOffice (this can take several minutes)...")
+                if _run_install(instalador.build(manager, "libreoffice"),
+                                timeout=3600) != 0 or not rutas.soffice_path():
+                    sys.stderr.write("FAILED: LibreOffice not found after installation.\n")
+                    sys.stderr.write("Paths examined: %s\n"
+                                     % " | ".join(p for p in rutas.soffice_candidates() if p))
+                    sys.stderr.write("If it is installed elsewhere, set APA7_SOFFICE "
+                                     "to the full path.\n")
+                    return 1
+                step("LibreOffice installed: %s" % rutas.soffice_path())
 
     # --- 6. Final check ------------------------------------------------------
     step("--- Final environment check ---")
@@ -921,7 +1091,7 @@ def _manifiesto_con_toc(rest):
     return manifiesto
 
 
-def _segunda_pasada_indices(node, build_js, rest, documento):
+def _segunda_pasada_indices(node, build_js, rest, documento, motor=None):
     """Fill the indexes' page numbers by exporting once and rebuilding.
 
     A TOC field's result is computed by the rendering engine, never by
@@ -929,6 +1099,13 @@ def _segunda_pasada_indices(node, build_js, rest, documento):
     sequence is: export the first .docx to a throwaway PDF, read the page of
     every entry with paginas-de-pdf.py, and rebuild the .docx passing that map
     with --paginas-json. Its numbers become the fields' cached result.
+
+    `motor` is the ALREADY RESOLVED engine name, and it is resolved by the
+    caller and passed in rather than chosen here. That is the whole point: the
+    throwaway export and the final export must paginate identically, and two
+    engines paginate differently. Letting each of them decide could measure the
+    pages with LibreOffice and then deliver a Word-rendered PDF whose index does
+    not match it.
 
     Everything temporary goes into the document's logs/ folder, never into the
     folder the user sees: the throwaway PDF and paginas.json used to be written
@@ -938,7 +1115,7 @@ def _segunda_pasada_indices(node, build_js, rest, documento):
     deleted once the run succeeds, and kept when it does not, since a PDF that
     could not be converted is exactly what one needs to look at.
 
-    Any missing piece (no venv, no LibreOffice, an unreadable PDF) leaves the
+    Any missing piece (no venv, no engine, an unreadable PDF) leaves the
     first .docx as the final one: the indexes then ship without numbers and Word
     fills them in when the document is opened. It is a degradation, not a
     failure, so the exit code of the first build is kept.
@@ -957,13 +1134,14 @@ def _segunda_pasada_indices(node, build_js, rest, documento):
     mapa = documento.paginas_json
 
     # Pass 1: export with the fields unresolved. cmd_export is reused so there is
-    # one LibreOffice code path, not two. Its stdout (the PDF path) is swallowed:
+    # one conversion code path, not two. Its stdout (the PDF path) is swallowed:
     # build's own contract must not gain stray lines.
     with contextlib.redirect_stdout(io.StringIO()):
         codigo = cmd_export(argparse.Namespace(
             docx=str(docx), outdir=str(logs),
             log=str(documento.log_paginas), timeout=300,
-            carpeta_trabajo=str(documento.trabajo)))
+            carpeta_trabajo=str(documento.trabajo),
+            motor=motor or "auto"))
     if codigo != 0:
         return 0
     pdf = documento.pdf_auxiliar
@@ -1001,6 +1179,9 @@ def cmd_build(args):
     When the manifest asks for real TOC fields, this runs build-docx.js twice
     (see _segunda_pasada_indices): the page numbers of the indexes only exist
     after a real export, which needs the .docx from the first run.
+
+    `--motor` is accepted here (and removed before forwarding) for one reason:
+    both passes must use the SAME engine, and the engine is decided once, here.
     """
     node = rutas.node_path()
     if not node:
@@ -1009,8 +1190,21 @@ def cmd_build(args):
         return 1
     rest = _forwarded(args)
     carpeta, rest = _extrae(rest, "--carpeta-trabajo")
+    motor, rest = _extrae(rest, "--motor")
     manifiesto = _valor_de(rest, "--manifiesto")
     destino = _valor_de(rest, "--out")
+
+    # The NAME is checked here, before anything is built, and the engine is only
+    # resolved further down. The two are split on purpose: a typo must fail
+    # immediately instead of being silently ignored (build-docx.js does not know
+    # this option, and `export` is a different command that would only fail much
+    # later), while resolving means probing Microsoft Word for real, which is
+    # seconds of work that a build without TOC fields never needs.
+    try:
+        pedido = motores_mod.normaliza(motor)
+    except ValueError as exc:
+        sys.stderr.write("ERROR: %s\n" % exc)
+        return 2
 
     documento = _rutas_de({"salida": destino, "manifiesto": manifiesto}, carpeta)
     if documento is None:
@@ -1033,7 +1227,23 @@ def cmd_build(args):
                       "build --manifiesto MANIFEST.json [--out salida.docx] [--log log.txt]")
     if codigo != 0 or _manifiesto_con_toc(rest) is None:
         return codigo
-    return _segunda_pasada_indices(node, build_js, rest, documento)
+
+    # Resolve the engine ONCE, before the measuring export, and hand the name to
+    # both passes. An engine that was asked for by name and is not usable is a
+    # hard error; `auto` with nothing usable only means the indexes ship without
+    # numbers, which _segunda_pasada_indices already handles. The name was
+    # normalised before the first pass; only the resolution is left.
+    elegido, estados = motores_mod.elegir(pedido)
+    if elegido is not None:
+        motor = elegido.nombre
+    elif pedido != "auto":
+        sys.stderr.write("ERROR: --motor %s cannot convert here: %s\n"
+                         % (pedido, estados[0].motivo if estados else "unknown"))
+        sys.stderr.write("Nothing else was used on purpose. Rerun without --motor to "
+                         "fall back automatically, or install this engine.\n")
+        return 2
+
+    return _segunda_pasada_indices(node, build_js, rest, documento, motor)
 
 
 def cmd_verify(args):
@@ -1116,10 +1326,28 @@ def main(argv=None):
 
     check_parser = subparsers.add_parser(
         "check", help="preflight (STEP 0): verify every required tool")
+    check_parser.add_argument(
+        "--motor", default="auto", metavar="<engine>",
+        help="which PDF engine to report on: one of %s (default: auto)"
+             % ", ".join(motores_mod.PREFIJOS))
+    check_parser.add_argument(
+        "--sin-sondeo", dest="sin_sondeo", action="store_true",
+        help="do not probe Microsoft Word, only report what is installed. Faster, "
+             "but 'installed' is not the same answer as 'can export'.")
+    check_parser.add_argument(
+        "--recheck-motor", dest="recheck_motor", action="store_true",
+        help="ignore the cached engine probe and run it again. Needed after Word is "
+             "installed, moved, repaired or upgraded.")
     check_parser.set_defaults(handler=cmd_check)
 
     export_parser = subparsers.add_parser(
-        "export", help=".docx -> .pdf with headless LibreOffice")
+        "export", help=".docx -> .pdf with Microsoft Word or headless LibreOffice")
+    export_parser.add_argument(
+        "--motor", default="auto", metavar="<engine>",
+        help="PDF engine: one of %s (default: auto = Word when a probe proves it "
+             "works here, LibreOffice otherwise). An engine named here that is not "
+             "usable is an error, never a silent fallback."
+             % ", ".join(motores_mod.PREFIJOS))
     export_parser.add_argument(
         "--docx", default=None,
         help="input .docx (default: the only .docx of the working folder)")
@@ -1135,11 +1363,17 @@ def main(argv=None):
     export_parser.add_argument("--timeout", type=int, default=300,
                                help="maximum wait in seconds (default: 300)")
     export_parser.add_argument(
+        "--actualizar-campos", dest="actualizar_campos", action="store_true",
+        help="with Microsoft Word: update the document fields (the table of contents) "
+             "before exporting, so the index carries Word's own page numbers. Off by "
+             "default: Word exports the fields as they were cached when the .docx was "
+             "built. Ignored by LibreOffice, which recalculates them on its own.")
+    export_parser.add_argument(
         "--cerrar-libreoffice", dest="cerrar_libreoffice", action="store_true",
-        help="before converting, close EVERY LibreOffice process, including the "
-             "user's open documents (unsaved work is lost). Off by default: the "
-             "conversion does not need it and only the skill's own leftovers are "
-             "cleaned.")
+        help="before converting with LibreOffice, close EVERY LibreOffice process, "
+             "including the user's open documents (unsaved work is lost). Off by "
+             "default: the conversion does not need it and only the skill's own "
+             "leftovers are cleaned.")
     export_parser.set_defaults(handler=cmd_export)
 
     install_parser = subparsers.add_parser(

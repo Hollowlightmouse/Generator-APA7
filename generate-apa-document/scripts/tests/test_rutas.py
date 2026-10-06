@@ -117,6 +117,179 @@ class TestSofficeCandidates(PlatformMixin, unittest.TestCase):
             self.assertIn("/from/path/soffice", rutas.soffice_candidates())
 
 
+class TestWordCandidates(PlatformMixin, unittest.TestCase):
+    """Word is never automated through a launcher, so finding it is the only
+    thing this module can do cheaply. Everything else is lib/word.py's job.
+
+    The interesting case is Windows: Click-to-Run nests the suite under a
+    versioned folder (Office16 today, Office15 on older machines), so the search
+    has to be a glob and not a literal path.
+    """
+
+    def test_the_environment_override_comes_first(self):
+        with env(APA7_WORD=r"D:\Portable\WINWORD.EXE"):
+            self.assertEqual(rutas.word_candidates()[0], r"D:\Portable\WINWORD.EXE")
+
+    def test_windows_looks_in_both_program_files(self):
+        with tempfile.TemporaryDirectory() as pf:
+            with tempfile.TemporaryDirectory() as pf86:
+                with env(APA7_WORD=None, ProgramFiles=pf,
+                         **{"ProgramFiles(x86)": pf86}), \
+                        self.as_windows(), \
+                        mock.patch.object(rutas.shutil, "which", return_value=None):
+                    found = rutas.word_candidates()
+        self.assertIn(str(Path(pf) / "Microsoft Office" / "root" / "Office16" / "WINWORD.EXE"), found)
+        self.assertIn(str(Path(pf86) / "Microsoft Office" / "root" / "Office16" / "WINWORD.EXE"), found)
+
+    def test_windows_also_globs_an_older_office_folder(self):
+        with tempfile.TemporaryDirectory() as pf:
+            base = Path(pf) / "Microsoft Office" / "root"
+            # glob() only matches what exists, which is why the older suite has
+            # to be on disk to be offered as a candidate at all.
+            (base / "Office15").mkdir(parents=True)
+            (base / "Office15" / "WINWORD.EXE").write_bytes(b"MZ")
+            with env(APA7_WORD=None, ProgramFiles=pf, **{"ProgramFiles(x86)": None}), \
+                    self.as_windows(), \
+                    mock.patch.object(rutas.shutil, "which", return_value=None):
+                found = rutas.word_candidates()
+        self.assertIn(str(base / "Office15" / "WINWORD.EXE"), found)
+
+    def test_a_program_files_that_does_not_exist_is_not_searched(self):
+        with env(APA7_WORD=None, ProgramFiles=r"C:\Nope", **{"ProgramFiles(x86)": None}), \
+                self.as_windows(), \
+                mock.patch.object(rutas.shutil, "which", return_value=None):
+            self.assertEqual(rutas.word_candidates(), [])
+
+    def test_windows_prefers_the_path_copy(self):
+        with env(APA7_WORD=None, ProgramFiles=r"C:\PF", **{"ProgramFiles(x86)": None}), \
+                self.as_windows(), \
+                mock.patch.object(rutas.shutil, "which", side_effect=lambda n: r"D:\From\Path\WINWORD.EXE"):
+            self.assertEqual(rutas.word_candidates()[0], r"D:\From\Path\WINWORD.EXE")
+
+    def test_macos_looks_in_both_application_folders(self):
+        with env(APA7_WORD=None, HOME="/Users/ada"), self.as_macos():
+            found = rutas.word_candidates()
+        self.assertIn("/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word", found)
+        self.assertIn(str(Path("/Users/ada") / "Applications" / "Microsoft Word.app"
+                          / "Contents" / "MacOS" / "Microsoft Word"), found)
+
+    def test_linux_has_no_word_to_find(self):
+        with env(APA7_WORD=None), self.as_linux():
+            self.assertEqual(rutas.word_candidates(), [])
+
+    def test_word_path_returns_the_first_candidate_that_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "WINWORD.EXE"
+            real.write_bytes(b"MZ")
+            with env(APA7_WORD=str(real)):
+                self.assertEqual(rutas.word_path(), str(real))
+
+    def test_word_path_is_none_when_nothing_is_there(self):
+        with env(APA7_WORD=r"D:\Nope\WINWORD.EXE"), self.as_linux():
+            self.assertIsNone(rutas.word_path())
+
+    def test_word_path_ignores_a_directory_that_only_looks_like_an_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp) / "WINWORD.EXE"
+            carpeta.mkdir()
+            with mock.patch.object(rutas, "word_candidates", return_value=[str(carpeta)]):
+                self.assertIsNone(rutas.word_path())
+
+
+class TestWordClaseRegistrada(PlatformMixin, unittest.TestCase):
+    """The cheap question: does this machine know Word.Application?
+
+    The registry is asked instead of `New-Object -ComObject Word.Application`
+    because instantiating the class LAUNCHES Word, and `check` has to stay cheap.
+    """
+
+    def _run(self, first_line="yes", exit_code=0):
+        return mock.patch.object(rutas, "run", return_value=rutas.NativeResult(
+            [first_line] if first_line else [], first_line, exit_code))
+
+    def test_windows_asks_the_registry(self):
+        with self.as_windows(), self._run("yes") as run:
+            self.assertTrue(rutas.word_clase_registrada())
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[0], "powershell")
+        self.assertIn("Word.Application", argv[-1])
+
+    def test_windows_reads_a_negative_answer(self):
+        with self.as_windows(), self._run("no"):
+            self.assertFalse(rutas.word_clase_registrada())
+
+    def test_a_failing_powershell_means_unknown_not_missing(self):
+        with self.as_windows(), self._run("", exit_code=1):
+            self.assertIsNone(rutas.word_clase_registrada())
+
+    def test_macos_uses_the_bundle_being_there(self):
+        with self.as_macos(), mock.patch.object(rutas, "word_path", return_value="/w"):
+            self.assertTrue(rutas.word_clase_registrada())
+        with self.as_macos(), mock.patch.object(rutas, "word_path", return_value=None):
+            self.assertFalse(rutas.word_clase_registrada())
+
+    def test_linux_has_no_word_class_to_look_for(self):
+        with self.as_linux():
+            self.assertIsNone(rutas.word_clase_registrada())
+
+
+class TestWordPids(PlatformMixin, unittest.TestCase):
+    """The safety rule in its purest form: Word is single-instance COM, so
+    attaching to it means quitting the user's own Word at the end."""
+
+    def _result(self, lines, exit_code=0):
+        return rutas.NativeResult(lines, "", exit_code)
+
+    def test_windows_lists_the_word_processes(self):
+        with self.as_windows(), \
+                mock.patch.object(rutas, "run", return_value=self._result(["1200", "1300"])):
+            self.assertEqual(rutas.word_pids(), [1200, 1300])
+
+    def test_noise_in_the_output_is_not_a_pid(self):
+        with self.as_windows(), \
+                mock.patch.object(rutas, "run", return_value=self._result(["", "1200", "no idea"])):
+            self.assertEqual(rutas.word_pids(), [1200])
+
+    def test_this_process_is_never_reported_as_the_user_word(self):
+        with self.as_windows(), \
+                mock.patch.object(rutas, "run",
+                                  return_value=self._result([str(os.getpid()), "1200"])):
+            self.assertEqual(rutas.word_pids(), [1200])
+
+    def test_a_failing_query_means_no_word_is_open(self):
+        # Guessing "maybe it is open" would refuse every export on a machine
+        # where the query is not permitted.
+        with self.as_windows(), mock.patch.object(rutas, "run", return_value=self._result([], exit_code=1)):
+            self.assertEqual(rutas.word_pids(), [])
+
+    def test_macos_uses_pgrep(self):
+        with self.as_macos(), \
+                mock.patch.object(rutas, "run", return_value=self._result(["4242"])) as run:
+            self.assertEqual(rutas.word_pids(), [4242])
+        self.assertEqual(run.call_args[0][0], ["pgrep", "-x", "Microsoft Word"])
+
+    def test_linux_never_reports_a_word(self):
+        with self.as_linux():
+            self.assertEqual(rutas.word_pids(), [])
+
+    def test_word_ya_abierta_is_just_a_question_about_the_pids(self):
+        with mock.patch.object(rutas, "word_pids", return_value=[7]):
+            self.assertTrue(rutas.word_ya_abierta())
+        with mock.patch.object(rutas, "word_pids", return_value=[]):
+            self.assertFalse(rutas.word_ya_abierta())
+
+
+class TestDryRun(unittest.TestCase):
+    def test_it_is_off_until_something_turns_it_on(self):
+        self.assertFalse(rutas.dry_run())
+        rutas.set_dry_run(True)
+        try:
+            self.assertTrue(rutas.dry_run())
+        finally:
+            rutas.set_dry_run(False)
+        self.assertFalse(rutas.dry_run())
+
+
 class TestSofficeConsole(unittest.TestCase):
     """On Windows the .com launcher is mandatory, on Unix there is only one."""
 

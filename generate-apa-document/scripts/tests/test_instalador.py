@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import apa7  # noqa: E402
 from lib import instalador  # noqa: E402
+from lib import motores as motores_mod  # noqa: E402
 from lib import rutas  # noqa: E402
 
 
@@ -27,6 +28,12 @@ def manager(name):
     return rutas.PackageManager(name, {"winget": "winget.exe", "brew": "/opt/homebrew/bin/brew",
                                        "apt": "/usr/bin/apt-get", "dnf": "/usr/bin/dnf",
                                        "pacman": "/usr/bin/pacman"}[name])
+
+
+def _motor_ausente():
+    """A Word that cannot be used, for the harness that simulates every platform."""
+    return motores_mod.Motor(nombre=motores_mod.WORD, ok=False,
+                             motivo="not installed. Searched: (simulated)")
 
 
 class TestPlans(unittest.TestCase):
@@ -216,6 +223,11 @@ class InstallHarness(unittest.TestCase):
                     rutas, "soffice_path",
                     side_effect=lambda: "/usr/bin/soffice"
                     if self.state["soffice"] else None),
+                # No Word on the simulated machines: this harness is about the
+                # install sequence, and a real probe would launch Word on the
+                # machine running the suite.
+                mock.patch.object(apa7.motores_mod, "estado_word",
+                                  side_effect=lambda probar=True, **_: _motor_ausente()),
                 mock.patch.object(rutas, "remove_tree", return_value=True),
                 mock.patch.object(rutas, "run", side_effect=fake_run),
                 mock.patch.object(sys, "stdin", stdin),
