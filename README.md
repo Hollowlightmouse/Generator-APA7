@@ -2,7 +2,7 @@
 
 Skill `generate-apa-document`. Builds a **Word (.docx) and PDF** academic document following the **APA 7th edition** rules, ready to submit: institutional cover page, table of contents and lists of tables/figures with real page numbers, all from a source Markdown `.md` (extracted with MinerU/Docling, for example).
 
-> **Export engine: headless LibreOffice (the fallback). The default engine is **auto**, which probes for Word on Windows/macOS; Word is used only when available and proven usable.**
+> **Export engine: the default engine is `auto`, which probes for Word on Windows/macOS and uses it only when available and proven usable; headless LibreOffice is the fallback.**
 
 ---
 
@@ -28,7 +28,7 @@ It is not a PDF-to-Word converter: it starts from a `.md` that already exists. W
 | **Node.js LTS + npm** | generating the `.docx` with the `docx` library | `winget install OpenJS.NodeJS.LTS`, `brew install node`, or the distro package |
 | **`docx` library (npm)** | building the cover, TOC, indices and tables | `npm install docx@9.7.1 --no-save` |
 | **`pymupdf` 1.28.2** | verifying the final PDF | installed into `.venv`, not into the system Python |
-| **LibreOffice** | engine for `.docx → .pdf` conversion (LibreOffice by default; **Word** optional via `auto` probe on Windows/macOS) | `winget install TheDocumentFoundation.LibreOffice`, `brew install --cask libreoffice`, or the distro package |
+| **LibreOffice** | engine for `.docx → .pdf` conversion (fallback; the default engine `auto` prefers **Word** on Windows/macOS when it is proven usable) | `winget install TheDocumentFoundation.LibreOffice`, `brew install --cask libreoffice`, or the distro package |
 | **Internet connection** | package manager, npm and pip downloads | — |
 
 Everything above except the internet is installed by `apa7.py install`, which picks the available package manager (`winget`, `brew`, `apt`, `dnf` or `pacman`) or prints the command to run by hand.
@@ -37,7 +37,7 @@ The skill validates these tools automatically before touching the document (**ST
 
 **Which Python command?** Use whichever your machine actually has: `python3` on macOS and most Linux distributions, `python` where it exists, and `py` on Windows. This README writes `python` for brevity, but every message printed by `apa7.py` shows the exact, copyable command using the interpreter that is running. Check the version first (`python3 --version`, `python --version` or `py --version`); it must be **3.9 or later**.
 
-Tool paths overridable by environment variable: `APA7_SOFFICE`, `APA7_PYTHON`, `APA7_NODEDIR`, `APA7_WORKDIR`, `APA7_SKILL_ROOT`. Details in [`generate-apa-document/references/system-requirements.md`](generate-apa-document/references/system-requirements.md).
+Tool paths overridable by environment variable: `APA7_SOFFICE`, `APA7_WORD`, `APA7_PYTHON`, `APA7_NODEDIR`, `APA7_WORKDIR`, `APA7_SKILL_ROOT`. Details in [`generate-apa-document/references/system-requirements.md`](generate-apa-document/references/system-requirements.md).
 
 ## Installation
 
@@ -102,6 +102,7 @@ You do not pass `--out`, `--log`, `--outdir` or `--json`: each phase derives its
   informe_apa/               ← working folder, name derived and sanitized
     datos/
       fuente.json            ← which .md this folder belongs to
+      portada.json           ← the cover answers (--portada), when provided
       MANIFEST.json          ← the manifest
       verificacion.json      ← verification report
     logs/
@@ -109,6 +110,8 @@ You do not pass `--out`, `--log`, `--outdir` or `--json`: each phase derives its
       02-build.log           ← build
       paginas.json           ← measured page numbers (double pass)
       03-export.log          ← export
+      04-paginas.log         ← throwaway-export log of the double pass
+      04-verificacion.log    ← verify
 ```
 
 - The deliverables keep the **original** name of the `.md`; only the working folder is renamed: no diacritics, invalid characters and spaces become `_`, Windows reserved names get a `_` suffix, capped at 60 characters (`Informe técnico.md` → `Informe_tecnico_apa/`).
@@ -149,8 +152,8 @@ python scripts/apa7.py verify --pdf "informe.pdf" --manifiesto "informe_apa/dato
 4. **Parser** — `apa7.py parse` turns `.md` + layout JSON into `MANIFEST.json` (in `<md>_apa/datos/`): it enriches, deduplicates, splits glued words (protecting URLs, DOIs, e-mails, file names and any term passed with `--terminos-protegidos`), computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
 5. **Mandatory questions (STEP 0.5)** — if `pendientes_bloqueantes` is not empty, the user is asked (cover data, missing titles/captions, "no tables/figures" confirmation) and nothing is built until they are resolved. The cover answers are saved in `portada.json` and passed to the parser with `--portada`.
 6. **Build the `.docx`** — `apa7.py build` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references, writing the `.docx` next to the source `.md`. It runs in **two passes**: it exports the first `.docx` to a throwaway PDF in `<md>_apa/logs/`, measures the real page of every entry with `paginas-de-pdf.py` and rebuilds with `--paginas-json` to cache those numbers in the `TOC` fields. The throwaway PDF is deleted once the second pass succeeds. Aborts with code 4 if a title or caption is missing.
-7. **Export to PDF** — `apa7.py export` converts `.docx → .pdf` with headless LibreOffice (temporary copy + isolated profile per run), writing the PDF next to the `.docx`.
-8. **Verify** — `apa7.py verify` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes above their image and hanging indent in references. If a critical check fails, it is fixed and exported again; nothing is deleted, so the failing PDF stays for inspection.
+7. **Export to PDF** — `apa7.py export` converts `.docx → .pdf` with the resolved engine — Word when it is available and proven usable, headless LibreOffice as fallback (temporary copy + isolated profile per run) — writing the PDF next to the `.docx`. `--motor auto|word|libreoffice` forces one engine (exit 2 if the named one cannot convert; it never falls back silently).
+8. **Verify** — `apa7.py verify` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes below their image and hanging indent in references. If a critical check fails, it is fixed and exported again; nothing is deleted, so the failing PDF stays for inspection.
 9. **Deliver** — both files are delivered (`.docx` and `.pdf`).
 
 ```
@@ -160,7 +163,7 @@ Activation
              └─ apa7.py parse ──► MANIFEST.json (+ diagnostico)
                   └─ STEP 0.5  Blocking pending questions? ──► (yes) ask the user
                        └─ apa7.py build ──► document.docx
-                            └─ apa7.py export (headless LibreOffice) ──► document.pdf
+                             └─ apa7.py export (resolved engine: Word / LibreOffice fallback) ──► document.pdf
                                  └─ apa7.py verify ──► (failures) fix ──► re-export
                                       │       └── Delivery: .docx + .pdf next to the .md, plus informe_apa/ to inspect or delete
 ```
