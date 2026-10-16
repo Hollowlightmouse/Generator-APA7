@@ -67,7 +67,7 @@ class _BuildReal(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def _construye(self, manifiesto):
+    def _componentes(self, manifiesto):
         ruta_man = self.tmp / "MANIFEST.json"
         ruta_man.write_text(json.dumps(manifiesto), encoding="utf-8")
         salida = self.tmp / "salida.docx"
@@ -80,7 +80,11 @@ class _BuildReal(unittest.TestCase):
         self.assertEqual(proc.returncode, 0,
                          "build-docx.js failed:\n%s\n%s" % (proc.stdout, proc.stderr))
         with zipfile.ZipFile(salida) as z:
-            return z.read("word/document.xml").decode("utf-8")
+            return (z.read("word/document.xml").decode("utf-8"),
+                    z.read("word/styles.xml").decode("utf-8"))
+
+    def _construye(self, manifiesto):
+        return self._componentes(manifiesto)[0]
 
     def _manifiesto(self, nota_tabla, nota_figura):
         img = self.tmp / "grafico.png"
@@ -241,6 +245,129 @@ class _BuildReal(unittest.TestCase):
         self.assertIn('w:anchor="apa_tbl_1"', xml)
         self.assertIn('w:anchor="apa_fig_1"', xml)
         self.assertIn('w:anchor="apa_sec_', xml)
+
+    # -- the APA block quote (>40 words) -----------------------------------
+    # APA 7: a textual quote of more than 40 words is set in its own paragraph,
+    # with a 1.27 cm (0.5 in) left indent, no first-line indent, no quotation
+    # marks and double spacing.
+
+    def test_la_cita_en_bloque_va_indentada_y_sin_comillas(self):
+        import re
+        man = self._manifiesto(nota_tabla=None, nota_figura=None)
+        texto = ("Las universidades hoy por hoy se preocupan por desarrollar y "
+                 "mejorar su actividad investigativa por varias razones.")
+        man["bloques"] = [
+            {"tipo": "cita", "texto": texto,
+             "segmentos": [{"text": texto, "bold": False, "italics": False}]},
+        ]
+        xml = self._construye(man)
+        p = next(p for p in re.findall(r"<w:p[ >].*?</w:p>", xml, re.S)
+                 if "actividad investigativa" in p)
+        self.assertIn('w:left="720"', p, p)
+        self.assertNotIn("<w:firstLine", p, p)
+        self.assertIn('w:line="480"', p, p)
+        # No quotation marks are added around the quote.
+        parrafos = self._parrafos(xml)
+        cita = [t for t in parrafos if "actividad investigativa" in t][0]
+        self.assertEqual(cita, texto)
+
+    # -- the typeface comes from the manifest ------------------------------
+
+    def test_sin_tipografia_el_documento_usa_times_new_roman_12(self):
+        xml = self._construye(self._manifiesto(
+            nota_tabla="Fuente.", nota_figura=None))
+        self.assertIn('w:ascii="Times New Roman"', xml)
+        self.assertIn('w:val="24"', xml)  # 12 pt = 24 half-points
+
+    def test_la_tipografia_del_manifiesto_se_aplica_en_todo_el_documento(self):
+        man = self._manifiesto(nota_tabla="Fuente.", nota_figura="Fuente.")
+        man["tipografia"] = {"nombre": "Arial", "pt": 11}
+        xml = self._construye(man)
+        self.assertIn('w:ascii="Arial"', xml)
+        self.assertIn('w:hAnsi="Arial"', xml)
+        self.assertIn('w:val="22"', xml)  # 11 pt = 22 half-points
+        self.assertNotIn('w:ascii="Times New Roman"', xml)
+
+    # -- the table content is 2 pt smaller than the body (APA 7) -----------
+    # The guide's table anatomy: element "Contenido" may drop 2 points, while
+    # the number, the title and the note keep the body size.
+
+    def _tamano_del_run(self, xml, texto):
+        import re
+        for run in re.findall(r"<w:r>.*?</w:r>", xml, re.S):
+            if re.search(r"<w:t[^>]*>" + re.escape(texto) + r"</w:t>", run):
+                m = re.search(r'<w:sz w:val="(\d+)"', run)
+                if m:
+                    return int(m.group(1))
+        return None
+
+    def test_el_contenido_de_la_tabla_va_dos_puntos_menor_que_el_cuerpo(self):
+        xml = self._construye(self._manifiesto(
+            nota_tabla="Fuente de la tabla.", nota_figura=None))
+        # Body is Times New Roman 12 pt (24 half-points); the table content
+        # drops 2 pt to 10 pt (20 half-points), header row included.
+        self.assertEqual(self._tamano_del_run(xml, "Columna A"), 20)
+        self.assertEqual(self._tamano_del_run(xml, "Columna B"), 20)
+        # The caption number and the note keep the body size (24).
+        self.assertEqual(self._tamano_del_run(xml, "Fuente de la tabla."), 24)
+
+    def test_el_contenido_de_la_tabla_baja_dos_puntos_tambien_con_otra_fuente(self):
+        man = self._manifiesto(nota_tabla=None, nota_figura=None)
+        man["tipografia"] = {"nombre": "Arial", "pt": 11}
+        xml = self._construye(man)
+        # Arial 11 pt (22 half-points) -> table content 9 pt (18 half-points).
+        self.assertEqual(self._tamano_del_run(xml, "Columna A"), 18)
+
+    # -- the headings are REAL APA styles (Heading1..Heading5) --------------
+    # APA 7: a heading is a real Heading 1..5 style, not bold text on a plain
+    # paragraph. The library's built-in styles are blue and oversized, so each
+    # level has to be redefined black and in the body font; otherwise Word's
+    # navigation pane and a `TOC \o` field see a flat, blue document.
+
+    def _manifiesto_con_titulos(self):
+        man = self._manifiesto(nota_tabla=None, nota_figura=None)
+        man["secciones"] = [
+            {"texto": "Introduccion", "hid": 1, "nivel": 1},
+            {"texto": "Detalle", "hid": 2, "nivel": 3},
+        ]
+        man["bloques"] = [
+            {"tipo": "h", "hid": 1, "nivel": 1, "texto": "Introduccion",
+             "segmentos": [{"text": "Introduccion", "bold": False, "italics": False}]},
+            {"tipo": "p", "texto": "cuerpo", "marcador": None,
+             "segmentos": [{"text": "cuerpo", "bold": False, "italics": False}]},
+            {"tipo": "h", "hid": 2, "nivel": 3, "texto": "Detalle",
+             "segmentos": [{"text": "Detalle", "bold": False, "italics": False}]},
+        ]
+        return man
+
+    def test_un_titulo_lleva_el_estilo_real_Heading_n(self):
+        import re
+        xml, _ = self._componentes(self._manifiesto_con_titulos())
+        p1 = next(p for p in re.findall(r"<w:p[ >].*?</w:p>", xml, re.S)
+                  if "Introduccion" in p and "<w:bookmarkStart" in p)
+        self.assertIn('w:pStyle w:val="Heading1"', p1, p1)
+        p3 = next(p for p in re.findall(r"<w:p[ >].*?</w:p>", xml, re.S)
+                  if "Detalle" in p and "<w:bookmarkStart" in p)
+        self.assertIn('w:pStyle w:val="Heading3"', p3, p3)
+
+    def test_los_estilos_de_titulo_son_negros_y_no_los_azules_de_la_libreria(self):
+        import re
+        _, estilos = self._componentes(self._manifiesto_con_titulos())
+        for nivel in range(1, 6):
+            m = re.search(r'<w:style [^>]*w:styleId="Heading%d">.*?</w:style>' % nivel,
+                          estilos, re.S)
+            self.assertIsNotNone(m, "Heading%d is not defined" % nivel)
+            bloque = m.group(0)
+            self.assertIn('<w:color w:val="000000"/>', bloque)
+            # The default heading colours must not survive the override.
+            self.assertNotIn("2E74B5", bloque)
+            self.assertNotIn("1F4D78", bloque)
+            # Every level carries the outline level a `TOC \o` field collects.
+            self.assertIn('<w:outlineLvl w:val="%d"/>' % (nivel - 1), bloque)
+        h3 = re.search(r'<w:style [^>]*w:styleId="Heading3">.*?</w:style>',
+                       estilos, re.S).group(0)
+        self.assertIn("<w:b/>", h3)
+        self.assertIn("<w:i/>", h3)
 
 
 if __name__ == "__main__":

@@ -12,11 +12,16 @@ It is an **agent skill** (a `SKILL.md` plus helper scripts) that turns the outpu
 
 It is not a PDF-to-Word converter: it starts from a `.md` that already exists. What it does is **structure and formalize** it:
 
-- **Institutional cover page** with a 3-zone layout (title at the top, authors vertically centered, institutional block anchored at the bottom) and an optional logo only if you provide it.
+- **Institutional cover page** with a 3-zone layout (title at the top, authors vertically centered, institutional block anchored at the bottom), an optional logo only if you provide it, and the page number shown in the top-right corner **from the cover page on**.
+- **One typeface for the whole document**, chosen with `--fuente`: Times New Roman 12 pt by default, or Arial 11, Calibri 11, Lucida Sans Unicode 10, Georgia 11 or Computer Modern 10. The choice is stored in the manifest and the verifier measures the line spacing against that family's own metrics.
+- **APA 7 headings**: a heading never keeps its number (`## 3. Análisis` → `Análisis`; the number is stored apart in the manifest as `etiqueta` and not printed) and is never left in ALL CAPS — a fully-uppercase heading is rewritten to sentence case with acronyms preserved (`## 3. ANÁLISIS DE OWASP` → `Análisis de OWASP`). A heading already in sentence case is left as written.
+- **APA 7 textual quotes**: any quote of 40 words or fewer stays inline in the paragraph; a longer quote (written as a Markdown block quote, `>`) becomes its own paragraph with a 1,27 cm left indent, no first-line indent and no quotation marks.
+- **Table/figure attribution, never silent**: an unsourced table or figure raises a blocking question — provide the source (`De "Título" por Autor, año. (URL)`, or `Adaptado de …`) or set it to `Elaboración propia`. A `Nota. …` line already in the `.md` is kept verbatim.
 - **Table of contents always**, and **lists of tables and figures only when they exist**, as real Word `TOC` fields. The page numbers are measured by a **double pass** (build → throwaway PDF → `paginas-de-pdf.py` → rebuild) and shipped as the cached field result, so the PDF has them right even without Word; Word recalculates them on open.
 - **Automatic correction** of conversion artifacts: glued words (`2:Diferenciaciónentre Bugs` → `2: Diferenciación entre Bugs`), duplicated list markers (`• •`, `1. 1.`), glued numbering (`ACTIVIDAD1:`). Pure UPPERCASE acronyms (`OWASP`, `CVSS`), URLs, DOIs, e-mails and file names are never touched, and **every** change is reported, split into clear corrections and items to review, so a term split by mistake can be protected or fixed in the source `.md`.
 - **References normalized to APA 7**: alphabetical order, hanging indent and italics where appropriate, even if the `.md` already brings them as a list.
 - **Wide tables on an occasional landscape page** (allowed by APA 7) for comparison matrices that do not fit in portrait.
+- **Table content in single spacing and 2 points smaller** than the body (header row included), with only horizontal lines. The number and the title keep the body size and double spacing; the note keeps the body size.
 - **Final verification with `pymupdf`** before delivering: cover, indices, captions, landscape pages, notes and references.
 - Delivers **both files** (`.docx` and `.pdf`).
 
@@ -97,15 +102,14 @@ You do not pass `--out`, `--log`, `--outdir` or `--json`: each phase derives its
 ```
 <carpeta del .md>/
   informe.md                 ← your source, untouched
-  informe.docx               ← deliverable, same name as the .md
-  informe.pdf                ← deliverable, same name as the .md
-  informe_apa/               ← working folder, name derived and sanitized
-    datos/
+  deliverable/               ← working folder (fixed name, beside the .md)
+    informe.docx             ← deliverable, same name as the .md
+    informe.pdf              ← deliverable, same name as the .md
+    process/                 ← everything the run writes on the way
       fuente.json            ← which .md this folder belongs to
       portada.json           ← the cover answers (--portada), when provided
       MANIFEST.json          ← the manifest
       verificacion.json      ← verification report
-    logs/
       01-analisis.log        ← parse
       02-build.log           ← build
       paginas.json           ← measured page numbers (double pass)
@@ -114,7 +118,8 @@ You do not pass `--out`, `--log`, `--outdir` or `--json`: each phase derives its
       04-verificacion.log    ← verify
 ```
 
-- The deliverables keep the **original** name of the `.md`; only the working folder is renamed: no diacritics, invalid characters and spaces become `_`, Windows reserved names get a `_` suffix, capped at 60 characters (`Informe técnico.md` → `Informe_tecnico_apa/`).
+- The deliverables keep the **original** name of the `.md` and sit directly in `deliverable/`. The working folder is the fixed, portable name `deliverable/`, so it never needs sanitizing, and every intermediate goes under `process/`.
+- **Because the name is fixed, two `.md` files in the same folder share it.** The deliverables are told apart by the `.md` name (`informe.docx` vs `otro.docx`), but the files under `process/` belong to whichever document ran last.
 - **The working folder is reused, never versioned.** Rerunning the pipeline replaces the files in place instead of producing `informe (2).docx`.
 - **The throwaway PDF of the double pass is deleted** when the second pass succeeds; if it fails, that PDF stays, because it is the only record of what was measured. A failed verification likewise keeps its PDF and its whole working folder.
 - `--carpeta-trabajo <dir>` moves the working folder when the document lives elsewhere, and works on `parse`, `build`, `export` and `verify`.
@@ -133,15 +138,15 @@ python scripts/apa7.py install --yes
 python scripts/apa7.py parse --md "informe.md" --portada "portada.json"
 
 # 4. Build the .docx (two-pass, with real page numbers)
-python scripts/apa7.py build --manifiesto "informe_apa/datos/MANIFEST.json"
+python scripts/apa7.py build --manifiesto "deliverable/process/MANIFEST.json"
 
 # 5. Export to PDF
-python scripts/apa7.py export --docx "informe.docx"
+python scripts/apa7.py export --docx "deliverable/informe.docx"
 
 # 6. Verify the PDF
-python scripts/apa7.py verify --pdf "informe.pdf" --manifiesto "informe_apa/datos/MANIFEST.json"
+python scripts/apa7.py verify --pdf "deliverable/informe.pdf" --manifiesto "deliverable/process/MANIFEST.json"
 
-# Deliverables: informe.docx, informe.pdf, and informe_apa/ for inspection
+# Deliverables: deliverable/informe.docx, deliverable/informe.pdf, and deliverable/ for inspection
 ```
 
 ## Workflow
@@ -149,9 +154,9 @@ python scripts/apa7.py verify --pdf "informe.pdf" --manifiesto "informe_apa/dato
 1. **Activation** — the user asks for an academic document in APA (by intent).
 2. **STEP 0 · Preflight** — `apa7.py check` checks the tools. If something is missing, `apa7.py install` installs it and re-checks. If it does not return `RESULT: OK`, it stops and warns.
 3. **Inputs** — the `.md` (mandatory), the images and the layout JSON (optional) are received.
-4. **Parser** — `apa7.py parse` turns `.md` + layout JSON into `MANIFEST.json` (in `<md>_apa/datos/`): it enriches, deduplicates, splits glued words (protecting URLs, DOIs, e-mails, file names and any term passed with `--terminos-protegidos`), computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
-5. **Mandatory questions (STEP 0.5)** — if `pendientes_bloqueantes` is not empty, the user is asked (cover data, missing titles/captions, "no tables/figures" confirmation) and nothing is built until they are resolved. The cover answers are saved in `portada.json` and passed to the parser with `--portada`.
-6. **Build the `.docx`** — `apa7.py build` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references, writing the `.docx` next to the source `.md`. It runs in **two passes**: it exports the first `.docx` to a throwaway PDF in `<md>_apa/logs/`, measures the real page of every entry with `paginas-de-pdf.py` and rebuilds with `--paginas-json` to cache those numbers in the `TOC` fields. The throwaway PDF is deleted once the second pass succeeds. Aborts with code 4 if a title or caption is missing.
+4. **Parser** — `apa7.py parse` turns `.md` + layout JSON into `MANIFEST.json` (in `deliverable/process/`): it enriches, deduplicates, splits glued words (protecting URLs, DOIs, e-mails, file names and any term passed with `--terminos-protegidos`), computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
+5. **Mandatory questions (STEP 0.5)** — if `pendientes_bloqueantes` is not empty, the user is asked (cover data, missing titles/captions, "no tables/figures" confirmation, table/figure attribution) and nothing is built until they are resolved. The cover answers are saved in `portada.json` and passed to the parser with `--portada`.
+6. **Build the `.docx`** — `apa7.py build` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references, writing the `.docx` into `deliverable/` with the source `.md` name. It runs in **two passes**: it exports the first `.docx` to a throwaway PDF in `deliverable/process/`, measures the real page of every entry with `paginas-de-pdf.py` and rebuilds with `--paginas-json` to cache those numbers in the `TOC` fields. The throwaway PDF is deleted once the second pass succeeds. Aborts with code 4 if a title or caption is missing.
 7. **Export to PDF** — `apa7.py export` converts `.docx → .pdf` with the resolved engine — Word when it is available and proven usable, headless LibreOffice as fallback (temporary copy + isolated profile per run) — writing the PDF next to the `.docx`. `--motor auto|word|libreoffice` forces one engine (exit 2 if the named one cannot convert; it never falls back silently).
 8. **Verify** — `apa7.py verify` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes below their image and hanging indent in references. If a critical check fails, it is fixed and exported again; nothing is deleted, so the failing PDF stays for inspection.
 9. **Deliver** — both files are delivered (`.docx` and `.pdf`).
@@ -165,7 +170,7 @@ Activation
                        └─ apa7.py build ──► document.docx
                              └─ apa7.py export (resolved engine: Word / LibreOffice fallback) ──► document.pdf
                                  └─ apa7.py verify ──► (failures) fix ──► re-export
-                                      │       └── Delivery: .docx + .pdf next to the .md, plus informe_apa/ to inspect or delete
+                                      │       └── Delivery: .docx + .pdf in deliverable/, plus its process/ to inspect or delete
 ```
 
 ## How it works inside
@@ -173,6 +178,7 @@ Activation
 - **Image size without guessing by eye:** the parser reads each figure's `bbox` in the layout JSON (normalized to 0..1000), keeps its real proportion and clamps the width to the usable content width.
 - **Prose and order come from the `.md`**, not the JSON: the JSON files enrich the table width and the figure size, but do not rewrite the text.
 - **Genuinely functional TOC:** the indices are real `TOC` fields (`TOC \h \u` for the contents, `TOC \c "Tabla" \h` / `TOC \c "Figura" \h` for the lists), and their cached result carries the real pages measured in the double pass; Word recalculates them when the document is opened. Table and figure captions use real `SEQ` fields, which is what `TOC \c` collects, and the whole legend (`Tabla 1.`) renders **bold** — number included, written by the field's cached run.
+- **Real APA heading styles:** each heading is applied as `Heading 1`..`Heading 5` (not just bold text), so sections show in Word's navigation pane and a `TOC \o` field collects them. The library's built-in Heading styles come in blue and oversized, so all five are redefined to the document's typeface and size, **black**, bold (levels 3 and 5 italic), double spaced.
 - **Tables renderable in LibreOffice:** explicit width (`width` + `columnWidths` + `layout: FIXED`) and horizontal-only borders; without this, LibreOffice does not show them (known bug).
 - **Automatic per-table orientation:** a table that does not fit in portrait (6 or more columns, or very long cells) moves on its own to a **landscape page** with its title and note; afterwards the text returns to portrait. The criterion is legibility, not the number of rows.
 - **Figure note below the image** (generator default); **table note below the table** (APA 7 distinguishes them by position, not only by text).
@@ -207,7 +213,7 @@ Generator-APA7/
     │   └── lib/
     │       ├── rutas.py                  # portable path and tool resolution, and where a document's files go
     │       ├── instalador.py             # installation plans per package manager
-    │       ├── fuentes.py                # font names accepted by the verifier
+    │       ├── fuentes.py                # APA 7 typefaces, guide sizes and line metrics
     │       ├── motores.py                # engine detection (Word/LibreOffice/auto)
     │       └── word.py                   # Word COM/osascript driver and cache
     ├── .work/                            # generated state (docx's node_modules)
@@ -219,7 +225,7 @@ Generator-APA7/
 - **Windows, macOS and Linux.** The CLI is cross-platform: Python 3.9+ and no shell-specific syntax. The interpreter name is not hardcoded: use `python`, `python3` or `py`, whichever exists, and `apa7.py` prints the exact command it was run with. LibreOffice is found through `PATH` and the documented install locations; the Snap (`/snap/bin/libreoffice`) and Flatpak (`org.libreoffice.LibreOffice`) launchers and the `apt`/`dnf`/`pacman` plans are **best effort and have not been verified on this machine** — only the Windows locations have been exercised.
 - It does not convert directly from PDF to Word: it starts from a `.md` already extracted by MinerU or Docling. The layout JSON is optional, but without it the figures do not keep their real size.
 - **APA 7 letter format with 1 in margins**, with no extra institutional rules.
-- The cover page carries no visible page number; numbering starts on page 2.
+- The page number is visible from the cover page: UNIMINUTO numbers the document from the cover (the cover is page 1).
 - The `TOC` fields and the double pass are verified against **LibreOffice** (the shipped PDF). Word is not required: the default suite never starts it, and an opt-in integration test (`APA7_TEST_WORD_REAL=1`) exercises the Word export driver only when a real Word install is present (it passed on this machine). If a user updates the index fields *in Word*, the lists of tables/figures may keep only the number (Word's `\c` collects the caption paragraph, and the APA caption number and title are separate paragraphs). The delivered PDF already carries the full entries.
 - **Automated checks (CI).** `.github/workflows/ci.yml` runs the test suite (`unittest`) plus `apa7.py check` and `install --dry-run` on Windows, macOS and Linux with Python 3.9 and 3.12. It does **not** install LibreOffice, so the end-to-end `.docx → .pdf` export is not exercised there. The workflow has not run yet (there is no CI history in the repository), so the cross-OS claims above are pending that first run.
 

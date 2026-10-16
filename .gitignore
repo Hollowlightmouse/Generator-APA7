@@ -37,13 +37,18 @@ evaluacion/
 Prueba/
 
 # --- Estado de corrida del pipeline ----------------------------------------
+# _logs/ ya solo aparece con un --outdir explicito en export; por defecto los
+# intermedios van a deliverable/process/.
 _logs/
 *.log
 __pycache__/
 *.py[cod]
 
-# Carpeta de trabajo de un documento: <nombre>_apa/ con datos/ y logs/. Vive
+# Carpeta de trabajo de un documento: deliverable/ con process/ dentro. Vive
 # junto al .md que se esta convirtiendo, nunca dentro de la skill.
+deliverable/
+# Legado: carpetas <nombre>_apa/ de corridas viejas del layout anterior, para
+# que restos locales obsoletos no aparezcan como archivos sin seguimiento.
 *_apa/
 
 # --- Salidas generadas por la skill -----------------------------------------

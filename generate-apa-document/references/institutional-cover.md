@@ -78,7 +78,7 @@ content changes.
 | Field | Placeholder | Rule |
 |---|---|---|
 | Logo | `logo` | Optional. It is only inserted if the user provides the file. Otherwise nothing is inserted: no placeholder, no frame. Maximum width ~2 in, proportional height. **Always ask.** |
-| Page number | — | Top right, like the rest of the document. The cover page **does not show** a visible number. |
+| Page number | — | Top right, like the rest of the document. The cover page **does show** its number (it is page 1): UNIMINUTO numbers the document from the cover. |
 | Title | `titulo` | Bold, centered. It may span several lines. |
 | Authors | `autores` | **A single centered paragraph**, not bold. Full names separated by commas and with "y" before the last one, no matter how many there are. Not one per line. It accepts `"Nombre Apellido y Nombre Apellido"` or `["Nombre Apellido", "Nombre Apellido"]`: the text is respected as is, without splitting it or assuming authors. |
 | Faculty and university | `facultad` | One centered line, exactly as it appears in the source document. |

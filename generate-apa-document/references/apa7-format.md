@@ -7,20 +7,36 @@ General rules of the 7th edition of the APA manual, for student papers. This fil
 - Paper size: **Letter** (Letter, 21,59 x 27,94 cm / 8,5 x 11 in).
 - Margins: **2,54 cm (1 inch)** on all four sides.
 - Page number in the **top right** corner, in the header.
-- **The cover page has no visible number.** Numbering starts on page 2, which is
-  what APA 7 requires. The cover page counts as page 1 for the rest of the
-  calculations, but its number is not printed.
+- **The page number is visible from the cover page.** The cover is page 1 and shows
+  its number, as the UNIMINUTO guide requires ("Numeración de páginas: en la
+  esquina superior derecha, a partir de la portada"). This overrides the APA
+  student-paper default, where the cover page carries no visible number.
 
 ## Typography and Spacing
 
-- Font: Times New Roman 12 pt throughout the document, including the cover page,
-  the table of contents, the indexes, the table and figure legends, and the
-  references.
-- **Double** line spacing throughout the document.
+- **One typeface only**, from the list APA 7 allows for student papers, applied
+  to the whole document (cover page, table of contents, indexes, table and figure
+  legends and references). Times New Roman 12 pt is the default; the other
+  accepted sizes follow the APA manual. The choice goes on the command line
+  (`--fuente`, with `--tamano-fuente` to override the size) and is recorded in the
+  manifest as `tipografia`, which both `build-docx.js` and `verificar-pdf.py` read.
+
+  | `--fuente` | Default size |
+  |---|---|
+  | Times New Roman | 12 pt |
+  | Arial | 11 pt |
+  | Calibri | 11 pt |
+  | Lucida Sans Unicode | 10 pt |
+  | Georgia | 11 pt |
+  | Computer Modern | 10 pt |
+
+- **Double** line spacing throughout the document. The verifier measures the line
+  advance against the declared family, so a document in Arial is not judged by the
+  Times New Roman advance.
 - The body text is aligned **left**, not justified, with a first-line indent of
   1,27 cm (0,5 in) in each paragraph.
-- The table of contents entries are Times New Roman 12 pt and **not bold**, even
-  if the section title does have it.
+- The table of contents entries keep the document's typeface at its size and are
+  **not bold**, even if the section title does have it.
 
 ## Heading Levels
 
@@ -32,9 +48,27 @@ General rules of the 7th edition of the APA manual, for student papers. This fil
 | 4 | With first-line indent, bold, ending in a period. The text continues on the same line |
 | 5 | With first-line indent, bold italic, ending in a period. The text continues on the same line |
 
-The level 1 and 2 headings are **black, bold and Times New Roman 12 pt**. This is applied at run level (`bold: true, color: '000000', font: 'Times New Roman', size: 24`) because the `docx` library heading styles bring their own color and bold that override the document's.
+Every heading is applied as a **real Word style** (`Heading 1`..`Heading 5`), never only as bold text: that is what makes the section appear in Word's
+navigation pane, lets a `TOC \o` field pick it up and lets anyone restyle the
+document. See `word-toc-fields.md`.
 
-Headings must always be applied as **real styles** (Heading 1/2/3, etc.), never only as bold text: the table of contents depends on that. See `word-toc-fields.md`.
+The `docx` library's built-in Heading styles are **blue** (`2E74B5` / `1F4D78`)
+and oversized, so `build-docx.js` **redefines all five** to APA type: the
+document's typeface and size (Times New Roman 12 pt by default), **black**
+(`000000`), bold, italic for levels 3 and 5, double spacing, no extra space,
+and the matching `outlineLevel` (level 1 → 0). The per-level alignment (level 1
+centered, the rest left), the first-line indent of the inline levels 4-5 and
+the page break stay on each paragraph, so a level 1 only breaks the page when
+the page is already in use.
+
+A heading **never carries a number** and is **never written in ALL CAPS** (UNIMINUTO guide). When a `##` heading in the `.md` is written as `## 3. ANÁLISIS DE OWASP`, the parser drops the number (kept apart as `etiqueta`, which is not printed) and rewrites the all-caps text to APA sentence case: `Análisis de OWASP`. Acronyms survive; Spanish words do not. Concretely, inside a fully-uppercase heading the parser:
+
+- capitalizes the first word and lowercases the rest;
+- keeps a token uppercase when it is a probable acronym — a short all-caps token (2 to 6 letters) that the document never writes in lowercase (`OWASP`, `SAMM`, `SDL`), or any token with a digit, `&` or `/` (`ISO/IEC`, `27002`);
+- always lowercases Spanish closed-class words (`DE`, `DEL`, `LA`, `Y`, ...);
+- keeps the tokens listed in `--terminos-protegidos`.
+
+A heading already in sentence case is left untouched, so a proper noun the author wrote by hand (`Microsoft`, `Método`) is never damaged. Limitation to keep in mind: a proper noun written **only** in caps inside a fully-uppercase heading is lowercased unless it is the first word (`## ANÁLISIS DE MICROSOFT SDL` → `Análisis de microsoft SDL`); add it to `--terminos-protegidos` to pin its exact form.
 
 ### How it maps from the `.md`
 
@@ -94,10 +128,19 @@ otherwise portrait. When doing so:
 - **The title and the legend are not optional.** If the `.md` does not bring them,
   the parser leaves a blocking question for each one and `build-docx.js` aborts
   with code 4. There is no `(sin titulo)` that gets printed in their place.
-- In italic, only the word **"Nota."**, followed by normal text. By default
-  **"Nota. Elaboración propia."**, unless the `.md` indicates another source; the
-  parser fills it in on its own (`nota_origen: "default"`) and with
-  `--notas-tabla-json` / `--notas-figura-json` a specific one is substituted.
+- In italic, only the word **"Nota."**, followed by normal text. When the `.md`
+  does not indicate a source, the parser fills in **"Nota. Elaboración propia."**
+  (`nota_origen: "default"`) **and leaves a blocking question `atribucion_fuente`**:
+  the authorship default is not assumed silently. Answer it by giving the source
+  or by confirming `Elaboración propia`, via `--notas-tabla-json` /
+  `--notas-figura-json` (a specific one is substituted). The APA 7 forms for a
+  reproduced or adapted table/figure are:
+  - `De "Título del documento" por Autor, año de publicación. (URL)` (reproduced)
+  - `Adaptado de "Título del documento" por Autor, año de publicación. (URL)`
+    (modified)
+  - `Elaboración propia` (own work; the default)
+  A `Nota. …` line already in the `.md` wins over the default and is kept
+  verbatim (`nota_origen: "md"`), and then the question is not raised.
 - **The position distinguishes the case:**
   - **FIGURE note: below the image.**
   - **TABLE note: below the table.**
@@ -109,6 +152,11 @@ otherwise portrait. When doing so:
   **No** vertical lines, no side box and **no** lines between the data rows:
   those separations are made by the line spacing, not by a border. The header row
   may have light shading.
+- **Table content spacing and size:** the guide allows the content to go in
+  **1.5 or single spacing** (this document uses single: 240 twips) and lets the
+  font **drop 2 points** below the body. `build-docx.js` applies that drop to the
+  whole content, header row included (`TAM_TABLA = TAM - 4` half-points, floored
+  at 8 pt), while the number, the title and the note keep the body size.
 
 ## Lists
 
@@ -157,6 +205,21 @@ split that should not have been (`NodeJS` → `Node JS`) is either added to the
 protected-terms file and the parser re-run, or corrected in the source `.md`
 and the parser re-run. Prefixed surnames (`McDonald`, `MacArthur`) are handled
 the same way.
+
+## Textual Quotes
+
+- **Fewer than 40 words**: they go **inline**, inside the paragraph and between
+  quotation marks. Neither the font nor the size is changed.
+- **More than 40 words**: they go in their **own paragraph**, with a **left indent
+  of 1,27 cm (0,5 in)**, **without quotation marks**, keeping the **double spacing**
+  and the font size. They are never boxed nor set in a smaller font.
+- In the `.md` a long quote is written as a Markdown block quote: one or more
+  lines each starting with `>` (a bare `>` acts as a blank separator). Consecutive
+  `>` lines are joined into a **single** paragraph. The parser turns them into a
+  `cita` block and `build-docx.js` applies the 1,27 cm left indent, with no
+  first-line indent and no quotation marks.
+- The `&nbsp;` used in the guide's examples to push the quote to the right is
+  normalized to an ordinary space.
 
 ## References
 

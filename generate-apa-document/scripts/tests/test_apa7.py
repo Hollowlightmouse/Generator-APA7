@@ -217,12 +217,19 @@ class TestSeleccionDeMotor(CheckHarness):
         self.assertNotIn("RESULT: OK", out)
 
     def test_an_unknown_engine_name_is_an_error_listing_the_valid_ones(self):
+        # A bad --motor value is a usage error, not a missing tool: exit 2 and
+        # RESULT: ERROR, never MISSING (which would point the user at `install`).
         code, out, _, _ = self.run_check_con(
             _word(ok=False, ruta="", motivo="not installed"),
             args=argparse.Namespace(motor="openoffice"))
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("unknown PDF engine", out)
-        self.assertIn("RESULT: MISSING", out)
+        self.assertIn("RESULT: ERROR", out)
+        self.assertNotIn("RESULT: MISSING", out)
+        self.assertNotIn("RESULT: OK", out)
+        # No engine was probed and no tool line was written: a usage error never
+        # falls back to `auto`.
+        self.assertNotIn("Engine (.docx to .pdf)|", out)
 
     def test_a_forced_libreoffice_never_asks_about_word(self):
         code, out, _, disponible = self.run_check_con(
@@ -467,16 +474,17 @@ class TestExport(CheckHarness):
 
     def test_without_outdir_the_log_goes_to_the_documents_own_folder(self):
         # No _logs/ next to the user's document: that pile is what this change
-        # exists to remove.
+        # exists to remove. The log lands in the document's own working folder,
+        # under process/.
         self._export(self._ok_result(), outdir=None)
-        log_file = self.dir / "doc_apa" / "logs" / "03-export.log"
+        log_file = self.dir / "deliverable" / "process" / "03-export.log"
         self.assertTrue(log_file.is_file(), "03-export.log is not in %s" % log_file)
         self.assertFalse((self.dir / "_logs").exists())
 
     def test_carpeta_trabajo_redirects_the_logs_without_moving_the_pdf(self):
         self._export(self._ok_result(), outdir=None,
                      carpeta_trabajo=str(self.dir / "trabajo"))
-        self.assertTrue((self.dir / "trabajo" / "logs" / "03-export.log").is_file())
+        self.assertTrue((self.dir / "trabajo" / "process" / "03-export.log").is_file())
         self.assertTrue((self.dir / "doc.pdf").is_file())
 
     def test_an_explicit_log_is_respected(self):
@@ -937,7 +945,7 @@ class TestForwarding(CheckHarness):
 
         # Relative paths are resolved against the current directory, and these
         # subcommands now derive a working folder from the document they are
-        # handed, so a test must not drop `a_apa/` into the repository.
+        # handed, so a test must not drop `deliverable/` into the repository.
         previous = os.getcwd()
         self.addCleanup(os.chdir, previous)
         os.chdir(str(self.root))
@@ -989,7 +997,7 @@ class TestForwarding(CheckHarness):
         # at the end rather than in the middle of what the user wrote.
         self.assertEqual(
             recibidos[6:],
-            ["--log", str(self.root / "a_apa" / "logs" / "01-analisis.log")])
+            ["--log", str(self.root / "deliverable" / "process" / "01-analisis.log")])
 
     def test_nothing_is_appended_when_nothing_is_missing(self):
         _, calls, _, _ = self.call(["parse", "--md", "a.md", "--out", "b.json",
@@ -1084,16 +1092,16 @@ class TestRutasPorDefecto(TestForwarding):
         (self.root / "informe.md").write_text("# x", encoding="utf-8")
         _, calls, _, _ = self.call(["parse", "--md", "informe.md"])
         salida = self._flags(calls[0], "--out")
-        self.assertEqual(Path(salida), self.root / "informe_apa" / "datos" / "MANIFEST.json")
+        self.assertEqual(Path(salida), self.root / "deliverable" / "process" / "MANIFEST.json")
         log = self._flags(calls[0], "--log")
-        self.assertEqual(Path(log), self.root / "informe_apa" / "logs" / "01-analisis.log")
+        self.assertEqual(Path(log), self.root / "deliverable" / "process" / "01-analisis.log")
 
     def test_parse_records_which_md_the_folder_belongs_to(self):
         # Without this anchor, build/export/verify are handed a manifest and a
         # .docx with no idea which document they belong to.
         (self.root / "informe.md").write_text("# x", encoding="utf-8")
         self.call(["parse", "--md", "informe.md"])
-        fuente = self.root / "informe_apa" / "datos" / "fuente.json"
+        fuente = self.root / "deliverable" / "process" / "fuente.json"
         self.assertTrue(fuente.is_file())
         self.assertEqual(json.loads(fuente.read_text(encoding="utf-8"))["nombre"], "informe.md")
 
@@ -1102,14 +1110,14 @@ class TestRutasPorDefecto(TestForwarding):
         self.call(["parse", "--md", "informe.md"])
         self.assertEqual(sorted(p.name for p in self.root.iterdir()
                                 if p.name != "scripts"),
-                         ["informe.md", "informe_apa"])
+                         ["deliverable", "informe.md"])
         self.assertEqual(sorted(p.name for p in
-                                (self.root / "informe_apa").iterdir()),
-                         ["datos", "logs"])
+                                (self.root / "deliverable").iterdir()),
+                         ["process"])
 
-    def test_build_writes_the_docx_next_to_the_md_not_inside_the_folder(self):
+    def test_build_writes_the_docx_into_the_working_folder(self):
         (self.root / "informe.md").write_text("# x", encoding="utf-8")
-        datos = self.root / "informe_apa" / "datos"
+        datos = self.root / "deliverable" / "process"
         datos.mkdir(parents=True)
         (datos / "MANIFEST.json").write_text("{}", encoding="utf-8")
         (datos / "fuente.json").write_text(
@@ -1118,18 +1126,18 @@ class TestRutasPorDefecto(TestForwarding):
         _, calls, _, _ = self.call(["build", "--manifiesto",
                                     str(datos / "MANIFEST.json")])
         self.assertEqual(Path(self._flags(calls[0], "--out")),
-                         self.root / "informe.docx")
+                         self.root / "deliverable" / "informe.docx")
         self.assertEqual(Path(self._flags(calls[0], "--log")),
-                         self.root / "informe_apa" / "logs" / "02-build.log")
+                         self.root / "deliverable" / "process" / "02-build.log")
 
     def test_the_docx_is_never_called_manifest_docx(self):
         # The regression this catches: naming the deliverable after the artifact
         # that happened to be passed instead of after the document.
         (self.root / "informe.md").write_text("# x", encoding="utf-8")
-        datos = self.root / "informe_apa" / "datos"
+        datos = self.root / "deliverable" / "process"
         datos.mkdir(parents=True)
         (datos / "MANIFEST.json").write_text("{}", encoding="utf-8")
-        rutas.anota_fuente(self.root / "informe_apa", self.root / "informe.md")
+        rutas.anota_fuente(self.root / "deliverable", self.root / "informe.md")
         _, calls, _, _ = self.call(["build", "--manifiesto",
                                     str(datos / "MANIFEST.json")])
         self.assertEqual(Path(self._flags(calls[0], "--out")).name, "informe.docx")
@@ -1138,9 +1146,9 @@ class TestRutasPorDefecto(TestForwarding):
         (self.root / "informe.md").write_text("# x", encoding="utf-8")
         _, calls, _, _ = self.call(["verify", "--pdf", "p.pdf", "--manifiesto", "m.json"])
         self.assertEqual(Path(self._flags(calls[0], "--log")),
-                         self.root / "p_apa" / "logs" / "04-verificacion.log")
+                         self.root / "deliverable" / "process" / "04-verificacion.log")
         self.assertEqual(Path(self._flags(calls[0], "--json")),
-                         self.root / "p_apa" / "datos" / "verificacion.json")
+                         self.root / "deliverable" / "process" / "verificacion.json")
 
     def test_an_explicit_flag_always_wins(self):
         # The one rule the whole defaulting scheme rests on.
@@ -1161,7 +1169,7 @@ class TestRutasPorDefecto(TestForwarding):
                                     "--carpeta-trabajo", str(fuera)])
         self.assertNotIn("--carpeta-trabajo", calls[0])
         self.assertEqual(Path(self._flags(calls[0], "--out")),
-                         fuera / "datos" / "MANIFEST.json")
+                         fuera / "process" / "MANIFEST.json")
 
     def test_carpeta_trabajo_also_works_with_the_equals_form(self):
         (self.root / "informe.md").write_text("# x", encoding="utf-8")
@@ -1170,7 +1178,7 @@ class TestRutasPorDefecto(TestForwarding):
                                     "--carpeta-trabajo=%s" % fuera])
         self.assertNotIn("--carpeta-trabajo=%s" % fuera, calls[0])
         self.assertEqual(Path(self._flags(calls[0], "--out")),
-                         fuera / "datos" / "MANIFEST.json")
+                         fuera / "process" / "MANIFEST.json")
 
     def test_a_missing_md_is_left_to_the_target_script(self):
         # No anchor, no defaults, and no traceback out of the dispatcher either.
@@ -1182,15 +1190,15 @@ class TestRutasPorDefecto(TestForwarding):
         (self.root / "informe.md").write_text("# x", encoding="utf-8")
         self.call(["parse", "--md", "informe.md"])
         self.call(["parse", "--md", "informe.md"])
-        trabajo = self.root / "informe_apa"
-        self.assertEqual(sorted(p.name for p in trabajo.iterdir()), ["datos", "logs"])
+        trabajo = self.root / "deliverable"
+        self.assertEqual(sorted(p.name for p in trabajo.iterdir()), ["process"])
         # The manifest is written by the target script, which is mocked here; what
         # the dispatcher itself must not accumulate is the anchor.
-        self.assertEqual(sorted(p.name for p in trabajo.joinpath("datos").iterdir()),
+        self.assertEqual(sorted(p.name for p in trabajo.joinpath("process").iterdir()),
                          ["fuente.json"])
         self.assertEqual(sorted(p.name for p in self.root.iterdir()
                                 if p.name != "scripts"),
-                         ["informe.md", "informe_apa"])
+                         ["deliverable", "informe.md"])
 
     def test_a_warning_about_a_reused_folder_goes_to_stderr(self):
         # A folder pointed at a second document is a warning, not an error: the
@@ -1206,18 +1214,23 @@ class TestRutasPorDefecto(TestForwarding):
         self.assertIn("otro.md", err)
         self.assertEqual(out, "")
         self.assertEqual(json.loads(
-            (trabajo / "datos" / "fuente.json").read_text(encoding="utf-8"))["nombre"],
+            (trabajo / "process" / "fuente.json").read_text(encoding="utf-8"))["nombre"],
             "otro.md")
 
-    def test_two_documents_get_two_working_folders(self):
-        # The folder is named after the document, so two documents never collide.
+    def test_two_documents_side_by_side_share_the_one_working_folder(self):
+        # deliverable/ is a fixed name per directory, not a per-document name, so
+        # two .md files side by side share it. The finished artifacts are told
+        # apart by the .md name (informe.docx vs otro.docx); the second parse says
+        # out loud whose anchor it just rewrote.
         (self.root / "informe.md").write_text("# x", encoding="utf-8")
         (self.root / "otro.md").write_text("# y", encoding="utf-8")
         self.call(["parse", "--md", "informe.md"])
         _, _, _, err = self.call(["parse", "--md", "otro.md"])
-        self.assertEqual(err, "")
-        self.assertTrue((self.root / "informe_apa").is_dir())
-        self.assertTrue((self.root / "otro_apa").is_dir())
+        self.assertIn("WARNING", err)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()
+                                if p.name != "scripts"),
+                         ["deliverable", "informe.md", "otro.md"])
+        self.assertTrue((self.root / "deliverable" / "process").is_dir())
 
     def test_inyecta_never_overrides_what_the_user_wrote(self):
         self.assertEqual(apa7._inyecta(["--out", "x"], "--out", "y"), ["--out", "x"])

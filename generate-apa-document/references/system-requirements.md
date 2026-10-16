@@ -155,38 +155,41 @@ place that decides it, so no caller has to invent a path:
 
 | What | Where it lands by default |
 |---|---|
-| `parse` manifest (`--out`) | `<md>_apa/datos/MANIFEST.json` |
-| `parse` log (`--log`) | `<md>_apa/logs/01-analisis.log` |
-| `build` output (`--out`) | next to the `.md`, with the same name |
-| `build` log (`--log`) | `<md>_apa/logs/02-build.log` |
-| double-pass page map | `<md>_apa/logs/paginas.json` |
-| double-pass throwaway PDF | `<md>_apa/logs/`, deleted once pass 2 succeeds |
-| `export` PDF (`--outdir`) | next to the `.docx`, with the same name |
-| `export` log (`--log`) | `<md>_apa/logs/03-export.log` |
-| `verify` report (`--json`) | `<md>_apa/datos/verificacion.json` |
+| `parse` manifest (`--out`) | `<md dir>/deliverable/process/MANIFEST.json` |
+| `parse` log (`--log`) | `<md dir>/deliverable/process/01-analisis.log` |
+| `build` output (`--out`) | `<md dir>/deliverable/<md name>.docx` |
+| `build` log (`--log`) | `<md dir>/deliverable/process/02-build.log` |
+| double-pass page map | `<md dir>/deliverable/process/paginas.json` |
+| double-pass throwaway PDF | `<md dir>/deliverable/process/`, deleted once pass 2 succeeds |
+| `export` PDF (`--outdir`) | next to the `.docx`, in `deliverable/`, with the same name |
+| `export` log (`--log`) | `<md dir>/deliverable/process/03-export.log` |
+| `verify` report (`--json`) | `<md dir>/deliverable/process/verificacion.json` |
 
 `paginas-de-pdf.py` is called **without** `--out`, so it writes `paginas.json`
 into its working folder rather than into the folder the first `.docx` passed to
 it; the first pass uses a temporary copy precisely so it has no folder of its own
 to write into.
 
-The `<stem>_apa` name is derived from the `.md`: NFKD without diacritics,
-invalid/control characters and spaces become `_`, Windows reserved names get a
-`_` suffix, capped at 60 characters. `Informe técnico.md` becomes
-`Informe_tecnico_apa/`. The `.docx` and the `.pdf` keep their original name.
+Every document gets exactly **one** working folder, `deliverable/`, beside the
+`.md`: the finished `.docx` and `.pdf` sit directly in it, and every intermediate
+the run writes (the manifest, `fuente.json`, `paginas.json` and the logs) goes
+under `process/`. The folder name is a fixed, portable literal, so it never needs
+sanitizing. Because it is fixed, several `.md` files in the same folder share it:
+the deliverables are told apart by the `.md` name, but the files under `process/`
+are overwritten by whichever document ran last.
 
 A phase that is handed no document at all (`export` without `--docx`) looks for
-a single `.docx` in the **current folder** — the one that holds the `.md` and the
-`.docx`, not the working folder — and refuses to choose between zero or several.
-`datos/fuente.json` records which `.md` a folder belongs to, so a later phase can
-resolve the document without being told again; pointing a folder that already has
-an anchor at a different `.md` warns and updates it.
+a single `.docx` in the **working folder** — `deliverable/` beside the `.md`, or
+under `--carpeta-trabajo` — and refuses to choose between zero or several.
+`process/fuente.json` records which `.md` a folder belongs to, so a later phase
+can resolve the document without being told again; pointing a folder that already
+has an anchor at a different `.md` warns and updates it.
 
 `--carpeta-trabajo <dir>` overrides the working folder for `parse`, `build`,
-`export` and `verify`, and is the only way to put the logs somewhere other than
-next to the document. **Explicit flags win**: an `--outdir` on `export` keeps its
-historical behaviour (PDF *and* `<outdir>/_logs/03-export.log`), which is what
-existing callers depend on.
+`export` and `verify`, and is the only way to put the document's files somewhere
+other than `deliverable/` beside the `.md`. **Explicit flags win**: an `--outdir`
+on `export` keeps its historical behaviour (PDF *and* `<outdir>/_logs/03-export.log`),
+which is what existing callers depend on.
 
 Example: if the `docx` library is somewhere else because the project already
 had its own dependencies,

@@ -190,7 +190,8 @@ class TestNotaDeTabla(_Base):
 
 
 class TestNumeracion(_Base):
-    CLAVE = "Every page after the cover shows its number in the top right corner"
+    CLAVE = "Every page shows its number in the top right corner"
+    CLAVE_PORTADA = "The cover page carries page number 1"
 
     def _pdf(self, nombre, numeros):
         """numeros: dict {page_index: number} to print in the top strip."""
@@ -208,15 +209,24 @@ class TestNumeracion(_Base):
 
     def test_numeracion_correcta_pasa(self):
         man = self._escribe("mn1.json", manifiesto(0))
-        pdf = self._pdf("num_ok.pdf", {1: 2, 2: 3})
-        self.assertTrue(self._verifica(pdf, man)[self.CLAVE]["ok"])
+        pdf = self._pdf("num_ok.pdf", {0: 1, 1: 2, 2: 3})
+        res = self._verifica(pdf, man)
+        self.assertTrue(res[self.CLAVE]["ok"], res[self.CLAVE]["detalle"])
+        self.assertTrue(res[self.CLAVE_PORTADA]["ok"], res[self.CLAVE_PORTADA]["detalle"])
 
     def test_numero_equivocado_falla(self):
         man = self._escribe("mn2.json", manifiesto(0))
-        pdf = self._pdf("num_mal.pdf", {1: 2, 2: 9})
+        pdf = self._pdf("num_mal.pdf", {0: 1, 1: 2, 2: 9})
         res = self._verifica(pdf, man)[self.CLAVE]
         self.assertFalse(res["ok"])
         self.assertIn("page 3", res["detalle"])
+
+    def test_la_portada_sin_numero_falla(self):
+        man = self._escribe("mn3.json", manifiesto(0))
+        pdf = self._pdf("num_sin_portada.pdf", {1: 2, 2: 3})
+        res = self._verifica(pdf, man)
+        self.assertFalse(res[self.CLAVE_PORTADA]["ok"])
+        self.assertFalse(res[self.CLAVE]["ok"])
 
 
 class TestNotaDeFigura(_Base):
@@ -392,6 +402,42 @@ class TestTipografia(_Base):
         res = self._verifica(pdf, man)[self.CLAVE]
         self.assertTrue(res["ok"], res["detalle"])
         self.assertNotIn("NOT accepted", res["detalle"])
+
+    # -- the declared family comes from the manifest (M1) ------------------
+
+    def _declarando(self, nombre, pt):
+        data = manifiesto(0)
+        data["tipografia"] = {"nombre": nombre, "pt": pt}
+        return self._escribe("mt_tip.json", data)
+
+    def _pdf_cuerpo_en(self, nombre, cuerpo_fontfile):
+        """A two-page PDF whose body is set in `cuerpo_fontfile`."""
+        ruta = os.path.join(self.tmp, nombre)
+        doc = pymupdf.open()
+        for _ in range(2):
+            doc.new_page(width=612, height=792)
+        cuerpo = doc[1]
+        cuerpo.insert_font(fontname="cuerpo", fontfile=cuerpo_fontfile)
+        cuerpo.insert_text((72, 100), "Cuerpo del documento", fontsize=12,
+                           fontname="cuerpo")
+        doc.save(ruta)
+        doc.close()
+        return ruta
+
+    def test_aria_es_aceptada_cuando_el_documento_declara_arial(self):
+        man = self._declarando("Arial", 11)
+        pdf = self._pdf_cuerpo_en("tipo_arial_ok.pdf", self.ARIAL)
+        res = self._verifica(pdf, man)[self.CLAVE]
+        self.assertTrue(res["ok"], res["detalle"])
+        self.assertNotIn("NOT accepted", res["detalle"])
+
+    def test_times_no_es_aceptada_cuando_el_documento_declara_arial(self):
+        man = self._declarando("Arial", 11)
+        pdf = self._pdf_cuerpo_en("tipo_times_ajena.pdf", self.TIMES)
+        res = self._verifica(pdf, man)[self.CLAVE]
+        self.assertFalse(res["ok"])
+        self.assertIn("NOT accepted", res["detalle"])
+        self.assertIn("Times New Roman", res["detalle"])
 
 
 if __name__ == "__main__":

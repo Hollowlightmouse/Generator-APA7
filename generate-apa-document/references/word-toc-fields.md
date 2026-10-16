@@ -53,20 +53,38 @@ Consequences that must not be undone:
 
 ## Recipes that work
 
-### 1. Heading with outline level and bookmark
+### 1. Heading with a real style, outline level and bookmark
 
-Each heading carries an applied `outlineLevel` (0-based) and a bookmark. The
-outline level is what `TOC \u` collects and what LibreOffice exports as a PDF
-bookmark, which is how the double pass measures the section's page:
+Each heading carries a **real Word style** (`Heading 1`..`Heading 5`) *and* an
+applied `outlineLevel` (0-based) plus a bookmark. The style puts the section in
+Word's navigation pane; the outline level is what `TOC \u` collects and what
+LibreOffice exports as a PDF bookmark, which is how the double pass measures the
+section's page:
 
 ```js
 new Paragraph({
-  outlineLevel: nivel - 1,          // nivel 1..5 -> 0..4
+  heading: HeadingLevel['HEADING_' + nivel], // real style, defined to APA type
+  outlineLevel: nivel - 1,                    // nivel 1..5 -> 0..4
   children: [new Bookmark({
     id: 'apa_sec_' + hid,
     children: runsDe(segmentos, estilo),
   })],
 });
+```
+
+The library's built-in Heading styles are blue and oversized, so all five are
+redefined in `styles.default` to the document's typeface and size, **black**,
+bold (levels 3 and 5 italic), double spacing and no extra space, each with its
+own `outlineLevel`:
+
+```js
+const estiloHeadingApa = (nivel) => ({
+  run: { font: FUENTE, size: TAM, color: '000000', bold: true,
+         italics: nivel === 3 || nivel === 5 },
+  paragraph: { spacing: { line: 480, before: 0, after: 0 },
+               outlineLevel: nivel - 1 },
+});
+// styles.default: { heading1: estiloHeadingApa(1), ..., heading5: estiloHeadingApa(5) }
 ```
 
 ### 2. Table of contents as a real `TOC` field
@@ -210,7 +228,7 @@ the script hang:
   pipe handle can keep `soffice` alive after the parent has finished, so a
   reader on that pipe never sees EOF. That is what used to leave the pipeline
   hanging with no output. The files are read after the process ends, then
-  deleted; the log goes to `<md>_apa/logs/03-export.log`. Passing `--outdir`
+  deleted; the log goes to `deliverable/process/03-export.log`. Passing `--outdir`
   without `--carpeta-trabajo` keeps the historical behaviour instead (PDF and
   log together in `<outdir>/_logs/03-export.log`).
 - **Do not use a shell background operator or `Start-Process`.** A nested
@@ -235,10 +253,10 @@ the script hang:
 
 `scripts/paginas-de-pdf.py` reads the throwaway PDF and writes the page map that
 the second `build` consumes. Invoked by `apa7.py build` it is called **without**
-`--out`, so the map lands in the working folder as `<md>_apa/logs/paginas.json`:
+`--out`, so the map lands in the working folder as `deliverable/process/paginas.json`:
 
 ```bash
-python scripts/paginas-de-pdf.py --pdf <md>_apa/logs/<stem>.pdf \
+python scripts/paginas-de-pdf.py --pdf deliverable/process/<stem>.pdf \
     --manifiesto <manifiesto.json>
 ```
 
@@ -249,7 +267,13 @@ since it is then the only record of what was actually measured.
 - **Sections**: `doc.get_toc()` returns the PDF outline built from the applied
   outline levels, with **1-based** pages. Each manifest section is matched to
   the next outline entry whose normalized title matches; a title that is missing
-  from the outline does not shift the following sections.
+  from the outline does not shift the following sections. The match ignores a
+  **trailing period**, because APA levels 4 and 5 are run-in: `build-docx.js`
+  closes those headings with a final period (`"...Texto."`) while the manifest
+  keeps the title without it, and the two must still be the same section or it
+  would never get a cached page. (The PDF bookmark *level* is not compared: on
+  export LibreOffice collapses skipped levels, e.g. a level 3 under a level 1
+  shows as bookmark level 2, which does not affect the measured page.)
 - **Tables and figures**: the first `Tabla N` / `Figura N` at or after the start
   of the body. A line that starts with `Tabla 1. ...` in the list of tables is
   inside the front matter, so it is ignored.
@@ -263,7 +287,7 @@ since it is then the only record of what was actually measured.
 
 On the resulting PDF:
 
-- [ ] Cover page with the fields that exist; no visible page number.
+- [ ] Cover page with the fields that exist; page number visible (cover is page 1).
 - [ ] Tabla de contenido: page numbers that match the real page of each title.
 - [ ] Indices de tablas y de figuras: entries "Tabla N  Titulo...  pagina"
       with the correct number, and only if the document has those elements.

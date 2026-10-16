@@ -9,8 +9,8 @@ be checked automatically and REPRODUCIBLY:
 
   1. The PDF opens and has pages.
   2. The page size is Letter (612 x 792 pt) with 1 inch margins.
-  3. The cover page does NOT carry a page number.
-  4. Page 2 DOES carry the number, and in the top right corner.
+  3. Every page carries its own number in the top right corner, starting with
+     the cover page as page 1 (UNIMINUTO numbers the document from the cover).
   5. Every section of the manifest appears as a heading in the PDF.
   6. Every table appears, with its number and its content.
   7. Every figure appears.
@@ -24,8 +24,8 @@ be checked automatically and REPRODUCIBLY:
 
 Usage:
     python verificar-pdf.py --pdf salida.pdf --manifiesto MANIFEST.json
-                            [--log salida/_logs/04-verificacion.log]
-                            [--json salida/_logs/04-verificacion.json]
+                            [--log deliverable/process/04-verificacion.log]
+                            [--json deliverable/process/04-verificacion.json]
 
 Returns 0 if there are no FAILURES, 1 if there is any.
 """
@@ -318,9 +318,9 @@ def verificar(args):
     else:
         R.anota("Left margin >= 1 inch", False, "no text blocks found", critico=False)
 
-    # --- 3 and 4. Cover page numbering ---------------------------------
-    # The cover page must not show any loose number in the top right corner;
-    # page 2 must, and it must match the real 2.
+    # --- 3 and 4. Page numbering ---------------------------------------
+    # UNIMINUTO numbers the document from the cover page: page 1 (the cover)
+    # shows its number in the top right corner, and so does every page after it.
     def numero_en_esquina(i):
         if i >= total:
             return None
@@ -332,25 +332,24 @@ def verificar(args):
         return int(m.group(1)) if m else None
 
     n1 = numero_en_esquina(0)
-    R.anota("The cover page does NOT carry a page number", n1 is None,
+    R.anota("The cover page carries page number 1", bool(total) and n1 == 1,
             "number detected in the top right corner: %s" % (n1 if n1 is not None else "none"))
 
-    if total > 1:
-        # Every page after the cover must show ITS OWN number in the top right
-        # corner, including the landscape ones. The cover page is the only one
-        # without a number.
+    if total:
+        # Every page must show ITS OWN number in the top right corner, including
+        # the cover page and the landscape ones.
         mal_numeradas = []
-        for i in range(1, total):
+        for i in range(total):
             n = numero_en_esquina(i)
             if n != i + 1:
                 mal_numeradas.append("page %d shows %s" % (i + 1, n if n is not None else "none"))
-        R.anota("Every page after the cover shows its number in the top right corner",
+        R.anota("Every page shows its number in the top right corner",
                 not mal_numeradas,
-                ("all %d pages numbered correctly (page 2..%d)" % (total - 1, total))
+                ("all %d pages numbered correctly (page 1..%d)" % (total, total))
                 if not mal_numeradas else "%d wrong: %s" % (len(mal_numeradas), "; ".join(mal_numeradas[:5])))
     else:
-        R.anota("Every page after the cover shows its number in the top right corner",
-                False, "the PDF has only 1 page", critico=False)
+        R.anota("Every page shows its number in the top right corner",
+                False, "the PDF has no pages", critico=False)
 
     # --- 3b. Cover page in 3 zones (WARNINGS, never block) ---------------
     # These four are NOT failures: the cover page is built with whatever data
@@ -692,16 +691,27 @@ def verificar(args):
                     if (span.get("text") or "").strip():
                         dibujadas.add(span.get("font") or "")
 
+    # The declared family comes from the manifest, so a document in Arial is
+    # judged against Arial (and its metric substitutes), not against Times.
+    tip = M.get("tipografia") or {}
+    if isinstance(tip, dict):
+        fam_nombre = tip.get("nombre") or fuentes_mod.FAMILIA_POR_DEFECTO
+        fam_pt = tip.get("pt")
+    else:
+        fam_nombre, fam_pt = (tip or fuentes_mod.FAMILIA_POR_DEFECTO), None
+    if not fam_pt:
+        fam_pt = fuentes_mod.tamano_por_defecto(fam_nombre) or 12
+
     declaradas, sustituciones, rechazadas = fuentes_mod.particiona(
-        sorted(dibujadas))
+        sorted(dibujadas), familia=fam_nombre)
     detalle = "fonts: %s" % (", ".join(sorted(embebidas)) if embebidas else "none")
     sin_texto = sorted(n for n in embebidas
                        if sin_prefijo(n) not in {sin_prefijo(d) for d in dibujadas})
     if sin_texto:
         detalle += ("  -> no visible text (not judged): %s" % ", ".join(sin_texto))
     if sustituciones:
-        detalle += ("  -> metric-compatible substitute for Times New Roman: %s"
-                    % ", ".join(sustituciones))
+        detalle += ("  -> metric-compatible substitute for %s: %s"
+                    % (fam_nombre, ", ".join(sustituciones)))
     if rechazadas:
         detalle += "  -> NOT accepted: " + "; ".join(
             "%s (%s)" % (nombre, motivo) for nombre, motivo in rechazadas)
@@ -714,11 +724,14 @@ def verificar(args):
     #
     # The line ADVANCE is measured instead: the difference between the top edge of
     # two consecutive lines of the same column. Times New Roman 12 advances ~13.8 pt
-    # at single spacing and ~27.6 pt at double spacing.
+    # at single spacing and ~27.6 pt at double spacing. The expected advance and the
+    # threshold depend on the family/size (Arial 11 advances less than Times 12), so
+    # they come from lib/fuentes instead of a single hardcoded number.
     #   Careful: measuring the gap between boxes (y0_next - y1_previous) does not
     #   work: at double spacing that gap is also ~13.8 pt (double spacing pushes the
     #   box, it does not make it taller), and it would give a false negative.
-    UMBRAL_DOUBLE = 20.0
+    avance_simple = fuentes_mod.avance_simple_pt(fam_nombre, fam_pt)
+    UMBRAL_DOUBLE = fuentes_mod.umbral_doble(fam_nombre, fam_pt)
     avances = []
     for i in range(CUERPO, min(total, CUERPO + 15)):
         bs = [b for b in bloques[i] if len(b) >= 5 and isinstance(b[4], str) and b[4].strip()]
@@ -730,8 +743,10 @@ def verificar(args):
         avances.sort()
         mediana = avances[len(avances) // 2]
         R.anota("Double line spacing in the body", mediana >= UMBRAL_DOUBLE,
-                "median line advance = %.1f pt (double ~27,6 | single ~13,8)"
-                % mediana, critico=False)
+                "median line advance = %.1f pt (%s %g pt: double ~%.1f | "
+                "single ~%.1f)" % (mediana, fam_nombre, fam_pt,
+                                   2 * avance_simple, avance_simple),
+                critico=False)
     else:
         R.anota("Double line spacing in the body", False,
                 "consecutive lines could not be paired to measure", critico=False)

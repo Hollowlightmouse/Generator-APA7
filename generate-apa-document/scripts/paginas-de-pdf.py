@@ -24,6 +24,18 @@ def norm(texto):
     return re.sub(r"\s+", " ", texto or "").strip().lower()
 
 
+def clave_titulo(texto):
+    """`norm`, minus a trailing period.
+
+    APA level 4 and 5 headings are run-in: build-docx.js closes them with a
+    final period and the body continues in the same paragraph. The PDF outline
+    therefore carries "...Texto." while the manifest keeps "...Texto" (a TOC
+    entry must not end in a period), and the two must still be seen as the same
+    heading or those sections would never get a cached page number.
+    """
+    return norm(texto).rstrip(".").strip()
+
+
 def paginas_de_secciones(doc, secciones):
     """hid -> 1-based page, from the PDF outline.
 
@@ -39,14 +51,14 @@ def paginas_de_secciones(doc, secciones):
     cuerpo = min(p for _n, _t, p in toc)
     idx = 0
     for _nivel, titulo, pagina in toc:
-        nt = norm(titulo)
+        nt = clave_titulo(titulo)
         elegido = None
-        if idx < len(secciones) and norm(secciones[idx].get("texto", "")) == nt:
+        if idx < len(secciones) and clave_titulo(secciones[idx].get("texto", "")) == nt:
             elegido = idx
             idx += 1
         else:
             for j in range(idx, len(secciones)):
-                if norm(secciones[j].get("texto", "")) == nt:
+                if clave_titulo(secciones[j].get("texto", "")) == nt:
                     elegido = j
                     idx = j + 1
                     break

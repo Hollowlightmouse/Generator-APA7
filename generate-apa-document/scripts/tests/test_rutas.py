@@ -733,45 +733,10 @@ class TestDeps(unittest.TestCase):
         self.assertGreaterEqual(sys.version_info[:2], rutas.MIN_PYTHON)
 
 
-class TestSaneaNombre(unittest.TestCase):
-    """One name component that every OS accepts, without losing the meaning."""
+class TestSinExtension(unittest.TestCase):
+    """The deliverable name drops a known suffix and nothing else."""
 
-    def test_spaces_become_underscores(self):
-        self.assertEqual(rutas.sanea_nombre("Informe Comparativo SDLC"),
-                         "Informe_Comparativo_SDLC")
-
-    def test_diacritics_are_dropped_not_replaced_by_look_alikes(self):
-        self.assertEqual(rutas.sanea_nombre("Informe técnico anual"),
-                         "Informe_tecnico_anual")
-        self.assertEqual(rutas.sanea_nombre("Ñoño"), "Nono")
-
-    def test_characters_windows_forbids_become_underscores(self):
-        self.assertEqual(rutas.sanea_nombre('a<b>c:d"e/f\\g|h?i*j'), "a_b_c_d_e_f_g_h_i_j")
-
-    def test_control_characters_disappear(self):
-        self.assertEqual(rutas.sanea_nombre("informe\x01\x1fname"), "informe__name")
-
-    def test_windows_device_names_do_not_survive(self):
-        # A folder called CON cannot be created on Windows, and it fails at
-        # mkdir rather than at write time.
-        for reservado in ("CON", "con", "NUL", "COM1", "LPT9"):
-            self.assertNotEqual(rutas.sanea_nombre(reservado).upper(), reservado)
-        self.assertEqual(rutas.sanea_nombre("con"), "con_")
-
-    def test_trailing_dots_and_spaces_are_trimmed(self):
-        # Windows silently drops them, which makes the folder unreachable by the
-        # name that was printed to the user.
-        self.assertEqual(rutas.sanea_nombre("informe. "), "informe")
-        self.assertEqual(rutas.sanea_nombre("  informe  "), "informe")
-
-    def test_a_very_long_name_is_capped(self):
-        corto = rutas.sanea_nombre("x" * 300)
-        self.assertLessEqual(len(corto), rutas.MAX_NOMBRE)
-
-    def test_nothing_left_over_still_yields_a_name(self):
-        self.assertEqual(rutas.sanea_nombre("///"), "documento")
-
-    def test_sin_extension_known_suffixes_only(self):
+    def test_known_suffixes_only(self):
         self.assertEqual(rutas.sin_extension("informe.md"), "informe")
         self.assertEqual(rutas.sin_extension("informe.DOCX"), "informe")
         self.assertEqual(rutas.sin_extension("informe.txt"), "informe.txt")
@@ -791,31 +756,31 @@ class TestRutasDocumento(unittest.TestCase):
 
     def test_the_layout_is_what_the_docs_promise(self):
         r = rutas.rutas_documento(md=self.md)
-        self.assertEqual(r.trabajo, self.entrega / "Informe_tecnico_apa")
-        self.assertEqual(r.datos, r.trabajo / "datos")
-        self.assertEqual(r.logs, r.trabajo / "logs")
+        self.assertEqual(r.trabajo, self.entrega / "deliverable")
+        self.assertEqual(r.datos, r.trabajo / "process")
+        self.assertEqual(r.logs, r.trabajo / "process")
         self.assertEqual(r.manifiesto, r.datos / "MANIFEST.json")
         self.assertEqual(r.paginas_json, r.logs / "paginas.json")
         self.assertEqual(r.pdf_auxiliar, r.logs / "Informe técnico.pdf")
 
     def test_the_deliverables_keep_the_original_name(self):
-        # The working folder is sanitized; what the user sees is not. A PDF
-        # called Informe_tecnico.pdf is not what anyone asked for.
+        # A PDF called Informe_tecnico.pdf is not what anyone asked for: the
+        # delivered .docx and .pdf keep the .md name, and live in deliverable/.
         r = rutas.rutas_documento(md=self.md)
-        self.assertEqual(r.docx, self.entrega / "Informe técnico.docx")
-        self.assertEqual(r.pdf, self.entrega / "Informe técnico.pdf")
+        self.assertEqual(r.docx, r.trabajo / "Informe técnico.docx")
+        self.assertEqual(r.pdf, r.trabajo / "Informe técnico.pdf")
 
     def test_crear_false_writes_nothing(self):
         r = rutas.rutas_documento(md=self.md)
         self.assertFalse(r.trabajo.exists())
         self.assertEqual(sorted(p.name for p in self.entrega.iterdir()), [self.md.name])
 
-    def test_crear_true_makes_only_the_two_subfolders(self):
+    def test_crear_true_makes_the_one_folder_and_its_process_subfolder(self):
         rutas.rutas_documento(md=self.md, crear=True)
         self.assertEqual(sorted(p.name for p in self.entrega.iterdir()),
-                         ["Informe técnico.md", "Informe_tecnico_apa"])
-        self.assertEqual(sorted(p.name for p in (self.entrega / "Informe_tecnico_apa").iterdir()),
-                         ["datos", "logs"])
+                         ["Informe técnico.md", "deliverable"])
+        self.assertEqual(sorted(p.name for p in (self.entrega / "deliverable").iterdir()),
+                         ["process"])
 
     def test_a_dry_run_creates_nothing(self):
         rutas.set_dry_run(True)
@@ -829,11 +794,11 @@ class TestRutasDocumento(unittest.TestCase):
         fuera = Path(self.tmp.name) / "otro sitio"
         r = rutas.rutas_documento(md=self.md, carpeta_trabajo=fuera)
         self.assertEqual(r.trabajo, fuera.resolve())
-        self.assertEqual(r.logs, fuera.resolve() / "logs")
+        self.assertEqual(r.logs, fuera.resolve() / "process")
 
     def test_build_finds_the_folder_through_the_manifest_and_not_the_docx(self):
         # export, build and verify are never handed the .md, so the manifest
-        # inside datos/ is what ties them back to the right document.
+        # inside process/ is what ties them back to the right document.
         r = rutas.rutas_documento(md=self.md)
         rutas.anota_fuente(r.trabajo, self.md)
         from_manifest = rutas.rutas_documento(manifiesto=r.manifiesto)
@@ -848,18 +813,29 @@ class TestRutasDocumento(unittest.TestCase):
         self.assertEqual(rutas.rutas_documento(manifiesto=r.manifiesto).docx.name,
                          "Informe técnico.docx")
 
-    def test_a_deliverable_is_never_placed_inside_the_working_folder(self):
+    def test_the_deliverable_lives_in_the_working_folder_next_to_process(self):
+        # The one folder holds both: the finished artifacts directly inside it and
+        # every intermediate under process/. A build driven from the manifest
+        # alone lands in exactly the same place as one driven from the .md.
         r = rutas.rutas_documento(md=self.md)
         rutas.anota_fuente(r.trabajo, self.md)
         desde_manifiesto = rutas.rutas_documento(manifiesto=r.manifiesto)
-        self.assertFalse(str(desde_manifiesto.docx).startswith(str(r.trabajo)))
+        self.assertEqual(desde_manifiesto.docx.parent, desde_manifiesto.trabajo)
+        self.assertEqual(desde_manifiesto.docx.parent, r.trabajo)
+        self.assertNotIn("process", desde_manifiesto.docx.parts)
 
     def test_a_folder_the_user_happened_to_name_like_ours_is_not_adopted(self):
-        # The name alone is not enough: datos/ is what this skill creates.
-        falso = self.entrega / "notas_apa"
+        # The name alone is not enough: process/ is what this skill creates. A
+        # `deliverable/` that already existed, with a stray manifest and fuente
+        # sitting at its root, is not read as the previous run's working folder.
+        falso = self.entrega / "deliverable"
         falso.mkdir()
+        (falso / "fuente.json").write_text('{"nombre": "ajeno.md"}', encoding="utf-8")
+        (falso / "MANIFEST.json").write_text("{}", encoding="utf-8")
         r = rutas.rutas_documento(salida=str(self.entrega / "algo.docx"))
-        self.assertNotEqual(r.trabajo, falso)
+        self.assertEqual(r.manifiesto, r.trabajo / "process" / "MANIFEST.json")
+        self.assertNotEqual(r.manifiesto, falso / "MANIFEST.json")
+        self.assertEqual(r.docx, r.trabajo / "algo.docx")
 
     def test_without_any_anchor_it_refuses_instead_of_inventing_a_folder(self):
         with self.assertRaises(ValueError):
@@ -870,13 +846,13 @@ class TestAnotaFuente(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.trabajo = Path(self.tmp.name) / "algo_apa"
+        self.trabajo = Path(self.tmp.name) / "deliverable"
         self.md = Path(self.tmp.name) / "algo.md"
         self.md.write_text("# x", encoding="utf-8")
 
     def test_it_records_the_source_and_its_name(self):
         rutas.anota_fuente(self.trabajo, self.md)
-        registrado = json.loads((self.trabajo / "datos" / "fuente.json").read_text(encoding="utf-8"))
+        registrado = json.loads((self.trabajo / "process" / "fuente.json").read_text(encoding="utf-8"))
         self.assertEqual(Path(registrado["md"]), self.md.resolve())
         self.assertEqual(registrado["nombre"], "algo.md")
 
@@ -895,8 +871,8 @@ class TestAnotaFuente(unittest.TestCase):
         self.assertIn("otro.md", aviso)
 
     def test_a_folder_without_the_anchor_is_adopted_without_asking(self):
-        (self.trabajo / "datos").mkdir(parents=True)
-        (self.trabajo / "datos" / "MANIFEST.json").write_text("{}", encoding="utf-8")
+        (self.trabajo / "process").mkdir(parents=True)
+        (self.trabajo / "process" / "MANIFEST.json").write_text("{}", encoding="utf-8")
         self.assertEqual(rutas.anota_fuente(self.trabajo, self.md), "")
 
     def test_a_dry_run_records_nothing(self):
@@ -908,8 +884,8 @@ class TestAnotaFuente(unittest.TestCase):
         self.assertFalse(self.trabajo.exists())
 
     def test_a_broken_anchor_is_not_fatal(self):
-        (self.trabajo / "datos").mkdir(parents=True)
-        (self.trabajo / "datos" / "fuente.json").write_text("{no es json", encoding="utf-8")
+        (self.trabajo / "process").mkdir(parents=True)
+        (self.trabajo / "process" / "fuente.json").write_text("{no es json", encoding="utf-8")
         self.assertEqual(rutas.anota_fuente(self.trabajo, self.md), "")
 
 

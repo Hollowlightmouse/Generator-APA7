@@ -9,23 +9,25 @@
  * arrives from MANIFIEST.json, which scripts\md-a-manifiesto.py produces.
  *
  * APA 7 rules it applies (references\apa7-format.md is the source):
- *   - Times New Roman 12, double spacing, no extra space before/after.
+ *   - ONE typeface (Times New Roman 12 by default; Arial 11, Calibri 11,
+ *     Lucida Sans Unicode 10, Georgia 11 or Computer Modern 10 on request),
+ *     double spacing, no extra space before/after.
  *   - 0.5" first-line indent in body paragraphs.
  *   - Text aligned to the LEFT (not justified to both margins).
  *   - Level 1 centered and bold; level 2 flush left and bold.
  *   - Page number in the TOP RIGHT CORNER (header, not footer).
- *   - The cover page has NO page number; visible numbering starts on
- *     page 2, which is what APA 7 requires.
+ *   - The cover page AND every following page show the page number, because
+ *     UNIMINUTO numbers the document from the cover page.
  *   - Tables and figures: number in bold, title in italics, then the
  *     object. Horizontal borders only in tables. The note ("Nota. ...")
  *     goes BELOW the table or the image, never above it.
  *   - Table of contents / list of tables / list of figures: real TOC
- *     fields, Times 12, entries not bold.
+ *     fields, same typeface, entries not bold.
  *   - References: 0.5" hanging indent, alphabetical order.
  *
  * Usage:
- *   node build-docx.js --manifiesto MANIFIEST.json --out salida.docx
- *                      [--log salida\_logs\02-docx.log]
+ *   node build-docx.js --manifiesto MANIFIEST.json --out deliverable\salida.docx
+ *                      [--log deliverable\process\02-docx.log]
  */
 
 "use strict";
@@ -59,7 +61,7 @@ const {
   Bookmark, SimpleField, PageBreak, Footer, Header, PageNumber, AlignmentType,
   BorderStyle, WidthType, ShadingType, VerticalAlign,
   SectionType, PageOrientation, TableLayoutType, HeightRule, convertInchesToTwip,
-  LineRuleType, TableOfContents,
+  LineRuleType, TableOfContents, HeadingLevel,
 } = require(RUTA_DOCX);
 
 // ---------------------------------------------------------------------------
@@ -141,8 +143,18 @@ if (faltantes.length) {
 // Formatting constants
 // ---------------------------------------------------------------------------
 
-const FUENTE = "Times New Roman";
-const TAM = 24;                       // 12 pt = 24 half-points
+// Typeface: ONE family for the whole document (APA 7). It arrives in the
+// manifest as M.tipografia = {nombre, pt}; the parser fixes the size to the
+// guide value for that family (Times New Roman 12 by default). Without it,
+// Times New Roman 12 is kept so old manifests still build.
+const TIPOGRAFIA = M.tipografia || {};
+const FUENTE = (typeof TIPOGRAFIA === "string" ? TIPOGRAFIA : TIPOGRAFIA.nombre) || "Times New Roman";
+const TAM_PT = (TIPOGRAFIA && TIPOGRAFIA.pt) ? TIPOGRAFIA.pt : 12;
+const TAM = Math.round(TAM_PT * 2);   // half-points (12 pt = 24)
+// APA 7: the table CONTENT may go 2 points smaller than the body (the number,
+// the title and the note keep the body size). 2 pt = 4 half-points. The APA
+// floor is 8 pt, so 16 half-points is the smallest allowed.
+const TAM_TABLA = Math.max(TAM - 4, 16);
 const DOBLE = 480;                    // double spacing (twips: 240 = single)
 const SANGRIA_1RA = 720;              // 0.5 inch
 const ANCHO_CONTENIDO = 9360;         // 8.5" - 1" - 1" = 6.5" in twips
@@ -277,7 +289,6 @@ const headerConPagina = new Header({
   })],
 });
 
-const headerVacio = new Header({ children: [new Paragraph({ children: [] })] });
 const footerVacio = new Footer({ children: [new Paragraph({ children: [] })] });
 
 // ---------------------------------------------------------------------------
@@ -614,7 +625,7 @@ function construirTabla(t, ancho = ANCHO_CONTENIDO) {
           text: l,
           bold: esCabecera,
           font: FUENTE,
-          size: TAM,
+          size: TAM_TABLA,   // APA 7: table content 2 pt smaller than the body
           break: k > 0 ? 1 : 0,
         })),
       });
@@ -865,6 +876,10 @@ function construirCuerpoSegmentado(hayContenidoPrevio) {
         // previous page is already full, does not fit in it, jumps to the next
         // one and leaves a blank page before the title.
         const p = new Paragraph({
+          // Real APA heading style (Heading1..Heading5) defined above: this is
+          // what puts the section in Word's navigation pane and lets a `TOC \o`
+          // field see it, instead of faking the level with bold runs.
+          heading: HeadingLevel[`HEADING_${nivel}`],
           alignment: nivel1 ? AlignmentType.CENTER : AlignmentType.LEFT,
           spacing: { line: DOBLE, before: 0, after: 0 },
           keepNext: !nivelEnLinea,
@@ -894,6 +909,18 @@ function construirCuerpoSegmentado(hayContenidoPrevio) {
           alignment: AlignmentType.LEFT,
           spacing: { line: DOBLE, before: 0, after: 0 },
           indent: { firstLine: SANGRIA_1RA },
+          children: runsDe(b.segmentos),
+        }));
+        break;
+
+      case "cita":
+        // APA 7: a textual quote of more than 40 words goes in its own
+        // paragraph, left indent 1.27 cm (0.5 in), WITHOUT a first-line
+        // indent and WITHOUT quotation marks, keeping double spacing.
+        emitir(new Paragraph({
+          alignment: AlignmentType.LEFT,
+          spacing: { line: DOBLE, before: 0, after: 0 },
+          indent: { left: SANGRIA_1RA },
           children: runsDe(b.segmentos),
         }));
         break;
@@ -1029,10 +1056,12 @@ async function main() {
   };
 
   const secciones = [
-    // Section 1: cover page alone, WITHOUT page number.
+    // Section 1: cover page alone. It carries the page number too, because
+    // UNIMINUTO (unlike the APA student paper default) numbers the document
+    // from the cover page.
     {
       properties: { ...propsVerticales, type: SectionType.NEXT_PAGE },
-      headers: { default: headerVacio },
+      headers: { default: headerConPagina },
       footers: { default: footerVacio },
       children: construirPortada(),
     },
@@ -1093,6 +1122,30 @@ async function main() {
     }
   }
 
+  // APA 7 heading styles (levels 1..5) as REAL Word styles, not only bold runs.
+  // Before this, each heading was a plain paragraph with run-level bold/italic
+  // and an applied outline level: it looked right, but the .docx had no
+  // "Heading 1".."Heading 5" for Word's navigation pane, for a `TOC \o` field or
+  // for anyone restyling the document. The library's built-in Heading styles are
+  // BLUE (2E74B5 / 1F4D78) and oversized, so each level is redefined here in APA
+  // type: body font and size, black, bold (levels 3 and 5 also italic), double
+  // spacing, no extra space. The per-level alignment, the first-line indent of
+  // the inline levels 4-5 and the page break stay per paragraph: a level 1 only
+  // breaks the page when something has already been written.
+  const estiloHeadingApa = (nivel) => ({
+    run: {
+      font: FUENTE,
+      size: TAM,
+      color: "000000",
+      bold: true,
+      italics: nivel === 3 || nivel === 5,
+    },
+    paragraph: {
+      spacing: { line: DOBLE, before: 0, after: 0 },
+      outlineLevel: nivel - 1,
+    },
+  });
+
   const doc = new Document({
     creator: "generate-apa-document",
     // Asks the consumer (Word) to recalculate every field when the file is
@@ -1105,6 +1158,12 @@ async function main() {
     styles: {
       default: {
         document: { run: { font: FUENTE, size: TAM }, paragraph: { spacing: { line: DOBLE, before: 0, after: 0 } } },
+        // Real APA heading styles, so the document exposes Heading 1..5.
+        heading1: estiloHeadingApa(1),
+        heading2: estiloHeadingApa(2),
+        heading3: estiloHeadingApa(3),
+        heading4: estiloHeadingApa(4),
+        heading5: estiloHeadingApa(5),
       },
       // The cached TOC entries are emitted with the built-in TOC1..TOC5 styles.
       // Defining them here keeps the indexes in APA type (Times 12, double

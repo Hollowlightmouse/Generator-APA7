@@ -30,14 +30,12 @@ Supported environment variables (all optional):
 import json
 import os
 import platform
-import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -188,32 +186,22 @@ def node_dir():
 # ---------------------------------------------------------------------------
 # Where one document's files live
 # ---------------------------------------------------------------------------
-# Every document gets exactly ONE working folder next to it, `<nombre>_apa/`,
-# holding `datos/` (the manifest plus everything the agent writes) and `logs/`.
-# The .md stays where the user put it, the .docx and .pdf are delivered next to
-# it, and nothing else is left behind. This is what replaces the flat pile of
-# MANIFEST.json, portada.json and *.log that the old flow dropped in the user's
-# folder.
+# Every document gets exactly ONE working folder next to it, `deliverable/`,
+# holding the finished artifacts (`<nombre>.docx` and `<nombre>.pdf`) directly
+# and everything the run writes on the way under `process/`: the manifest,
+# fuente.json, paginas.json and the logs. The .md stays where the user put it and
+# nothing else is left beside it. This replaces the old `<nombre>_apa/` folder
+# split into `datos/` and `logs/`, and the flat pile of MANIFEST.json,
+# portada.json and *.log the flow before that dropped in the user's folder.
+#
+# The folder name is a fixed, portable literal, so unlike the old computed
+# `<nombre>_apa` it never has to be sanitized. The delivered .docx and .pdf keep
+# the original .md name, because that is the name the user recognizes.
 #
 # GOLDEN RULE (the same one as above): no path of any specific machine is
 # hardcoded here. Everything is derived from the document the caller passed.
-SUFIJO_CARPETA_TRABAJO = "_apa"
-
-# Characters Windows forbids in a name, plus the ASCII control characters.
-_INVALIDOS = frozenset('<>:"/\\|?*') | frozenset(chr(c) for c in range(32))
-
-# CON, PRN, AUX, NUL, COM1-9 and LPT1-9 are device names on Windows: a folder
-# called CON cannot be created there, and it fails at mkdir rather than at write
-# time, which is the worst moment to find out.
-_RESERVADOS = frozenset(
-    ["CON", "PRN", "AUX", "NUL"]
-    + ["COM%d" % n for n in range(1, 10)]
-    + ["LPT%d" % n for n in range(1, 10)]
-)
-
-# Windows still allows only 260 characters for a whole path, and the working
-# folder sits in the middle of it, so the name gets a ceiling of its own.
-MAX_NOMBRE = 60
+CARPETA_ENTREGABLE = "deliverable"
+SUBCARPETA_PROCESO = "process"
 
 _SUFIJOS = (".md", ".markdown", ".docx", ".pdf", ".json")
 
@@ -225,26 +213,6 @@ def sin_extension(nombre):
         if text.lower().endswith(sufijo):
             return text[: -len(sufijo)]
     return text
-
-
-def sanea_nombre(nombre, maximo=MAX_NOMBRE):
-    """One name component that Windows, macOS and Linux all accept.
-
-    Diacritics are dropped (NFKD + remove combining marks) instead of being
-    replaced by look-alikes, so the working folder can be typed on any keyboard.
-    Only the working folder is sanitized: the delivered .docx and .pdf keep the
-    original name, because that is the name the user recognizes and expects to
-    find.
-    """
-    plano = unicodedata.normalize("NFKD", str(nombre))
-    plano = "".join(c for c in plano if not unicodedata.combining(c))
-    plano = "".join("_" if c in _INVALIDOS else c for c in plano)
-    plano = re.sub(r"\s+", "_", plano).strip("._ ")[:maximo].rstrip("._ ") or "documento"
-    # Last, deliberately: the trailing "_" below has to survive the trim, and a
-    # name is only compared to the device list once it has its final shape.
-    if plano.upper() in _RESERVADOS:
-        plano += "_"
-    return plano
 
 
 @dataclass(frozen=True)
@@ -277,23 +245,23 @@ def _resuelto(ruta):
 def _carpeta_existente(candidatos):
     """First ancestor of any candidate that already IS a working folder.
 
-    "Is a working folder" means the name ends in the suffix AND `datos/` is
-    there, which is what this skill creates. That second condition is what keeps
-    a folder the user happens to call `algo_apa` from being mistaken for one.
+    "Is a working folder" means the folder is named `deliverable` AND holds the
+    `process/` subfolder this skill creates. That second condition is what keeps
+    a folder the user happens to call `deliverable` from being mistaken for one.
     """
     for ruta in candidatos:
         if not ruta:
             continue
         for padre in (ruta,) + tuple(ruta.parents):
-            if padre.name.endswith(SUFIJO_CARPETA_TRABAJO) and (padre / "datos").is_dir():
+            if padre.name == CARPETA_ENTREGABLE and (padre / SUBCARPETA_PROCESO).is_dir():
                 return padre
     return None
 
 
 def _datos_fuente(trabajo):
-    """Contents of datos/fuente.json, or {}."""
+    """Contents of process/fuente.json, or {}."""
     try:
-        datos = json.loads((trabajo / "datos" / "fuente.json").read_text(encoding="utf-8"))
+        datos = json.loads((trabajo / SUBCARPETA_PROCESO / "fuente.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return datos if isinstance(datos, dict) else {}
@@ -304,13 +272,6 @@ def _fuente_registrada(trabajo):
     return _datos_fuente(trabajo).get("md") or None
 
 
-def _contiene(la_carpeta, ruta):
-    """True when `ruta` is inside `la_carpeta` (or is it)."""
-    if not ruta:
-        return False
-    return ruta == la_carpeta or la_carpeta in ruta.parents
-
-
 def rutas_documento(md=None, salida=None, manifiesto=None, carpeta_trabajo=None, crear=False):
     """Resolve one document's working folder and everything inside it.
 
@@ -319,8 +280,8 @@ def rutas_documento(md=None, salida=None, manifiesto=None, carpeta_trabajo=None,
       1. `carpeta_trabajo`, when the caller passed one.
       2. an existing working folder the given path already lives in. This is the
          one that matters: `build`, `export` and `verify` are never handed the
-         .md, so `datos/fuente.json` and the folder name are their only anchors.
-      3. `<folder of the artifact>/<name>_apa`.
+         .md, so the artifacts and `process/fuente.json` are their only anchors.
+      3. `<folder of the artifact>/deliverable`.
     """
     md = _resuelto(md)
     salida = _resuelto(salida)
@@ -331,27 +292,21 @@ def rutas_documento(md=None, salida=None, manifiesto=None, carpeta_trabajo=None,
 
     base = md or salida or manifiesto
     if trabajo is None and base is not None:
-        trabajo = base.parent / (sanea_nombre(sin_extension(base.name)) + SUFIJO_CARPETA_TRABAJO)
+        trabajo = base.parent / CARPETA_ENTREGABLE
     if trabajo is None:
         # Nothing to anchor on. Inventing a folder here would write a stray
-        # `documento_apa/` into whatever the current directory happens to be.
+        # `deliverable/` into whatever the current directory happens to be.
         raise ValueError(
             "rutas_documento() needs md, salida, manifiesto or carpeta_trabajo")
 
-    # The deliverables land next to the .md. Without one (a build started from a
-    # bare manifest) they land next to whatever artifact we were handed, unless
-    # that artifact is itself inside the working folder, which would put the
-    # deliverable inside the very folder meant to hold the intermediates.
-    if md is not None:
-        entrega = md.parent
-    elif not _contiene(trabajo, base):
-        entrega = base.parent
-    else:
-        entrega = trabajo.parent
+    # The artifacts and the intermediates share the single working folder: the
+    # .docx and .pdf sit directly in it, everything else goes under `process/`,
+    # so one folder holds the whole run and nothing is left beside the .md.
+    entrega = trabajo
 
     # The NAME of the document is what the .md was called, not what the artifact
     # we happen to have been handed is called. Only `parse` sees the .md, so the
-    # name travels with the rest of the anchor in datos/fuente.json; without it
+    # name travels with the rest of the anchor in process/fuente.json; without it
     # a build driven from the manifest alone would produce "MANIFEST.docx".
     nombre = _datos_fuente(trabajo).get("nombre")
     if not nombre and md is not None:
@@ -360,8 +315,8 @@ def rutas_documento(md=None, salida=None, manifiesto=None, carpeta_trabajo=None,
         nombre = base.name
     stem = sin_extension(nombre) if nombre else "documento"
 
-    datos = trabajo / "datos"
-    logs = trabajo / "logs"
+    datos = trabajo / SUBCARPETA_PROCESO
+    logs = trabajo / SUBCARPETA_PROCESO
 
     aviso = ""
     if md is not None:
@@ -388,14 +343,15 @@ def rutas_documento(md=None, salida=None, manifiesto=None, carpeta_trabajo=None,
         log_verify=logs / "04-verificacion.log",
         paginas_json=logs / "paginas.json",
         # Named after the .docx because LibreOffice derives the output name from
-        # the input. It lives in logs/ and is deleted once the run succeeds.
+        # the input. It lives in process/ and is deleted once the run succeeds.
         pdf_auxiliar=logs / (stem + ".pdf"),
         aviso=aviso,
     )
 
-    if crear and trabajo is not None and not _DRY_RUN:
+    if crear and not _DRY_RUN:
+        # `datos` and `logs` are the same folder (`process/`), so one mkdir does
+        # it. parents=True also creates `deliverable/` itself.
         datos.mkdir(parents=True, exist_ok=True)
-        logs.mkdir(parents=True, exist_ok=True)
     return rutas
 
 
@@ -421,9 +377,10 @@ def anota_fuente(trabajo, md, crear=True):
                  % (trabajo, previa, md))
     if _DRY_RUN:
         return aviso
+    proceso = trabajo / SUBCARPETA_PROCESO
     if crear:
-        (trabajo / "datos").mkdir(parents=True, exist_ok=True)
-    (trabajo / "datos" / "fuente.json").write_text(
+        proceso.mkdir(parents=True, exist_ok=True)
+    (proceso / "fuente.json").write_text(
         json.dumps({"md": str(md), "nombre": md.name}, indent=2) + "\n",
         encoding="utf-8")
     return aviso
