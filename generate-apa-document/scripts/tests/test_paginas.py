@@ -102,6 +102,22 @@ class TestMapaDeSecciones(_Base):
         doc.close()
         self.assertEqual(mapa, {"2": 5})
 
+    def test_un_titulo_en_linea_con_punto_final_se_reconoce(self):
+        # APA levels 4 and 5 are run-in: build-docx.js closes the heading with a
+        # final period, so the outline carries "Texto." while the manifest keeps
+        # "Texto". They must still match, or those sections never get a page.
+        pdf = self._pdf("enlinea.pdf", [
+            "Portada", "Tabla de contenido", "Indice de tablas",
+            "Inicio", "Medidas Tecnicas Recomendadas.",
+        ], toc=[[1, "Inicio", 4], [2, "Medidas Tecnicas Recomendadas.", 4]])
+        doc = pymupdf.open(pdf)
+        mapa, _ = self.mod.paginas_de_secciones(doc, [
+            {"hid": 1, "texto": "Inicio"},
+            {"hid": 7, "texto": "Medidas Tecnicas Recomendadas"},
+        ])
+        doc.close()
+        self.assertEqual(mapa, {"1": 4, "7": 4})
+
 
 class TestMapaDeIndices(_Base):
     def test_detecta_las_paginas_de_indice(self):

@@ -92,6 +92,20 @@ def cmd_check(args=None):
     documented behaviour, so `check` on its own needs no flags at all.
     """
     args = args or argparse.Namespace()
+
+    # An unknown --motor value is a usage error, rejected before any probe: the
+    # fix is to pass a valid engine name, and installing anything would not help.
+    # It ends with RESULT: ERROR and exit code 2, like every other bad argument,
+    # and never falls back to `auto` (that would silently pick an engine the user
+    # did not ask for). Emitted as prose, never as a tool line, so it cannot be
+    # mistaken for a MISSING tool that `install` would fix.
+    try:
+        pedido = motores_mod.normaliza(getattr(args, "motor", "auto"))
+    except ValueError as exc:
+        sys.stdout.write("ERROR: %s\n" % exc)
+        sys.stdout.write("RESULT: ERROR\n")
+        return 2
+
     results = []
 
     def report(ok, tool, detail):
@@ -202,12 +216,6 @@ def cmd_check(args=None):
     # `auto` does not probe during --dry-run: a dry run promises to create
     # nothing and launch nothing, and the probe launches Word.
     sondear_word = not (getattr(args, "sin_sondeo", False) or rutas.dry_run())
-    try:
-        pedido = motores_mod.normaliza(getattr(args, "motor", "auto"))
-    except ValueError as exc:
-        pedido = "auto"
-        report(False, "Engine (.docx to .pdf)", str(exc))
-
     motor_elegido, estados = motores_mod.elegir(
         pedido,
         probar_word=sondear_word,
@@ -1016,8 +1024,8 @@ def cmd_parse(args):
     rest = _forwarded(args)
     carpeta, rest = _extrae(rest, "--carpeta-trabajo")
     md = _valor_de(rest, "--md")
-    # crear=True: the documented layout is datos/ AND logs/, and it should be
-    # there from the first run instead of appearing later, one folder at a time.
+    # crear=True: the documented layout is deliverable/ with process/ inside it,
+    # and it should be there from the first run instead of appearing later.
     documento = _rutas_de({"md": md}, carpeta, crear=True)
     if documento is None:
         return _forward(rest, sys.executable,
@@ -1135,8 +1143,8 @@ def _segunda_pasada_indices(node, build_js, rest, documento, motor=None):
     pages with LibreOffice and then deliver a Word-rendered PDF whose index does
     not match it.
 
-    Everything temporary goes into the document's logs/ folder, never into the
-    folder the user sees: the throwaway PDF and paginas.json used to be written
+    Everything temporary goes into the document's process/ folder, never beside the
+    .docx the user sees: the throwaway PDF and paginas.json used to be written
     to `<docx folder>/_logs/`, which meant a `_logs/` directory beside the
     document the user was trying to tidy up. paginas.json is KEPT, because it is
     the evidence that explains an index with wrong pages; the throwaway PDF is
@@ -1282,7 +1290,7 @@ def cmd_verify(args):
     fails to import or, worse, imports a different version. The venv interpreter
     is selected here so `verify` behaves the same however it is invoked.
 
-    The report goes to the document's datos/ folder by default. It used to have
+    The report goes to the document's process/ folder by default. It used to have
     no default at all, which is why a failed verification often left nothing
     behind to explain it.
     """
@@ -1385,12 +1393,12 @@ def main(argv=None):
     export_parser.add_argument("--outdir", default=None,
                                help="output folder (default: the .docx folder)")
     export_parser.add_argument("--log", default=None,
-                               help="log file (default: <work folder>/logs/03-export.log, "
+                               help="log file (default: <work folder>/process/03-export.log, "
                                     "or <outdir>/_logs/03-export.log when --outdir is given)")
     export_parser.add_argument(
         "--carpeta-trabajo", dest="carpeta_trabajo", default=None, metavar="DIR",
-        help="folder that holds this document's datos/ and logs/. Defaults to "
-             "<name>_apa/ next to the .docx.")
+        help="folder that holds this document's .docx/.pdf and its process/ "
+             "subfolder. Defaults to a deliverable/ folder beside the document.")
     export_parser.add_argument("--timeout", type=int, default=300,
                                help="maximum wait in seconds (default: 300)")
     export_parser.add_argument(

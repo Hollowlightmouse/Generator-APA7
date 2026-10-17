@@ -21,15 +21,28 @@ What it fixes compared to the previous pipeline:
 Standard library only: it requires no pip install of anything.
 
 Typical usage:
-    python md-a-manifiesto.py --md doc.md --out salida/MANIFEST.json \
-        --log salida/_logs/01-analisis.log \
-        [--portada portada.json] [--ancho-pagina-landscape]
+    python md-a-manifiesto.py --md doc.md --out deliverable/process/MANIFEST.json \
+        --log deliverable/process/01-analisis.log \
+        [--portada portada.json] [--ancho-pagina-landscape] \
+        [--fuente "Arial"] [--tamano-fuente 11]
+
+Typeface (APA 7 allows one family for the whole document):
+    --fuente FAMILIA        Times New Roman (12 pt, default), Arial (11), Calibri
+                            (11), Lucida Sans Unicode (10), Georgia (11) or
+                            Computer Modern (10). An unknown name is an error.
+    --tamano-fuente PT      overrides the guide size of the chosen family.
+    The result is written to the manifest as
+    "tipografia": {"nombre": <family>, "pt": <size>}; build-docx.js and
+    verificar-pdf.py both read it.
 
 Agent answers (JSON {index: text}, 1-based index):
     --titulos-tabla-json   title of each table, if the .md does not bring it
     --titulos-figura-json  caption of each figure, if the .md does not bring it
     --notas-tabla-json      note of each table; default "Elaboracion propia"
     --notas-figura-json     note of each figure; default "Elaboracion propia"
+                            (and 'atribucion_fuente', a blocking question, asks
+                            whether the attribution is provided or the note stays
+                            as "Elaboracion propia")
 
     They are passed only for the missing indexes. They serve to answer the
     blocking questions that the parser itself leaves in
@@ -60,6 +73,11 @@ import re
 import sys
 import unicodedata
 from datetime import datetime, timezone
+
+# The font families and their metrics live in lib/ so the build and the verifier
+# share one definition. Explicit path insert because this script is run directly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib import fuentes as fuentes_mod  # noqa: E402
 
 VERSION_MANIFIESTO = 1
 
@@ -161,6 +179,86 @@ def fix_colon_spacing(text):
     return re.sub(r"[ \t]+([:;])", r"\1", text)
 
 
+def es_mayusculas_sostenidas(texto):
+    """True when every letter is uppercase (an ALL-CAPS heading).
+
+    Digits, spaces and punctuation are ignored: 'ISO/IEC 27002' counts as
+    uppercase, while a heading with one lowercase letter does not.
+    """
+    letras = [c for c in texto if c.isalpha()]
+    return len(letras) >= 2 and all(c.isupper() for c in letras)
+
+
+def _es_sigla(token):
+    """A token that APA keeps uppercase inside a sentence-case heading.
+
+    Any token carrying a digit, '&' or '/' is kept ('ISO/IEC', '27002', 'R&D').
+    A plain all-caps token is kept only when it really looks like an acronym:
+    it must be short (2 to 6 letters) and must NOT be a word the document uses
+    in lowercase. That second condition is what tells 'OWASP' (only ever seen in
+    uppercase) apart from 'METODO' (which the prose also writes as 'metodo').
+    """
+    letras = "".join(c for c in token if c.isalpha())
+    if not letras:
+        return False
+    if any(c.isdigit() for c in token) or any(ch in "&/" for ch in token):
+        return True
+    if not (letras.isupper() and 2 <= len(letras) <= 6):
+        return False
+    clave = norm_key(token)
+    if clave in PALABRAS_FUNCION_ES:
+        return False
+    # Corroboration: if the document also writes this token in lowercase, it is
+    # a normal word, not an acronym.
+    return clave not in _CORPUS_MINUSCULAS
+
+
+def _es_termino_protegido(token):
+    clave = norm_key(token)
+    return bool(clave) and any(norm_key(t) == clave for t in TERMINOS_PROTEGIDOS)
+
+
+def sentence_case_titulo(texto):
+    """ALL-CAPS heading -> APA sentence case, keeping acronyms.
+
+    'ANALISIS DE OWASP SAMM Y MICROSOFT SDL' -> 'Analisis de OWASP SAMM y
+    microsoft SDL'. The first word is capitalized; the rest is lowercased
+    except acronym-looking tokens (see _es_sigla) and the terms the document
+    protects with --terminos-protegidos. Only fully-uppercase headings are
+    touched: a heading already in sentence case is returned unchanged, so a
+    proper noun the user wrote by hand ('Microsoft') is never damaged.
+    """
+    if not es_mayusculas_sostenidas(texto):
+        return texto
+    # Split keeping the separators so spacing is reproduced exactly.
+    trozos = re.split(r"(\s+)", texto)
+    visto_palabra = False
+    salida = []
+    for trozo in trozos:
+        if not trozo or trozo.isspace():
+            salida.append(trozo)
+            continue
+        # A chunk may carry punctuation ("OWASP," or "(SDL)"). Work on the
+        # alphabetic core and keep the surrounding characters.
+        nucleo = "".join(c for c in trozo if c.isalpha())
+        if not nucleo:
+            salida.append(trozo)
+            continue
+        if _es_sigla(trozo) or _es_termino_protegido(trozo):
+            salida.append(trozo)
+        else:
+            nuevo = trozo.lower()
+            if not visto_palabra:
+                # Capitalize the first alphabetic character of the first word.
+                for k, c in enumerate(nuevo):
+                    if c.isalpha():
+                        nuevo = nuevo[:k] + c.upper() + nuevo[k + 1:]
+                        break
+            salida.append(nuevo)
+        visto_palabra = True
+    return "".join(salida)
+
+
 # ---------------------------------------------------------------------------
 # deglue: split words glued together by the conversion
 # ---------------------------------------------------------------------------
@@ -221,6 +319,25 @@ RE_MASCARA = re.compile(
 # --terminos-protegidos). They are matched as a full token, case-sensitively,
 # and masked like the structural patterns. They are set from main().
 TERMINOS_PROTEGIDOS = []
+
+# Every lowercase word the document carries, built once per run (see analizar).
+# It tells a real word apart from an acronym: 'METODO' is lowercased because
+# 'metodo' already appears in the prose, while 'OWASP' is kept because it never
+# appears in lowercase. Empty means "unknown"; then the length rule decides.
+_CORPUS_MINUSCULAS = set()
+
+# Spanish closed-class words that are always lowercased inside a heading, even
+# in a document that never writes them in lowercase (so 'DE' or 'DEL' are never
+# mistaken for a 2-3 letter acronym). Keys are norm_key() forms.
+PALABRAS_FUNCION_ES = {
+    "a", "al", "ante", "bajo", "con", "contra", "de", "del", "desde", "e",
+    "el", "en", "entre", "es", "esa", "ese", "eso", "esta", "este", "esto",
+    "hacia", "hasta", "la", "las", "le", "les", "lo", "los", "mas", "me",
+    "mediante", "mi", "mis", "muy", "ni", "no", "nos", "o", "os", "para",
+    "pero", "por", "que", "se", "segun", "sin", "so", "sobre", "son", "su",
+    "sus", "te", "tras", "tu", "tus", "u", "un", "una", "unas", "uno", "unos",
+    "y", "ya",
+}
 
 
 def _mascara(text):
@@ -541,6 +658,11 @@ RE_IMAGEN = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 RE_NUM_HEADING = re.compile(r"^\s*(\d{1,2})[\.\)]\s+(.*)$")
 RE_FIG_CAPTION = re.compile(r"^\s*(?:figura|imagen|image|ilustraci\u00f3n)\s*(\d+)\s*[.:\-\u2013]?\s*(.*)$", re.I)
 RE_TAB_CAPTION = re.compile(r"^\s*(?:tabla|cuadro|table)\s*(\d+)\s*[.:\-\u2013]?\s*(.*)$", re.I)
+# A note written in the .md next to a table or a figure: "Nota. Elaboracion
+# propia" / "Note: own elaboration". The leading emphasis markers are optional
+# because strip_leading_markers() already ate the opening "**" of "**Nota.**",
+# which can leave a stray "**" right after the label.
+RE_NOTA_LINEA = re.compile(r"^\s*\**\s*(?:nota|note)\s*[.:]\s*\**\s*(.+?)\s*$", re.I)
 RE_NRC = re.compile(r"\bNRC\s*[:\s]*\s*([0-9]{4,}[-\u2013A-Za-z0-9]*)", re.I)
 RE_DATE = re.compile(r"(\d{1,2})\s+de\s+([a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+)\s+de\s+(\d{4})", re.I)
 
@@ -945,8 +1067,17 @@ def _medir(obj, bbox, ancho_pt, alto_pt, ancho_max, espacio, es_figura):
 
 def analizar(md_path, base_dir, log, aplicar_deglue=True,
              detectar_en_linea=False):
+    global _CORPUS_MINUSCULAS
     texto = read_text(md_path)
     lineas = texto.splitlines()
+
+    # Words the document writes in lowercase: they are prose, not acronyms.
+    # Tokens that never appear in lowercase (true acronyms) stay out, so a
+    # heading like 'ANALISIS DE OWASP' keeps 'OWASP' but lowercases the rest.
+    _CORPUS_MINUSCULAS = {
+        norm_key(w) for w in re.findall(r"[^\W\d_]+", texto, re.UNICODE)
+        if any(c.islower() for c in w)
+    }
 
     bloques = []           # {tipo, ...}
     tablas = []            # {indice, titulo, filas, nota, origen}
@@ -1054,6 +1185,10 @@ def analizar(md_path, base_dir, log, aplicar_deglue=True,
                 texto_h2 = limpio
 
             texto_h2 = fix_colon_spacing(texto_h2).strip().rstrip(":").strip()
+            # APA 7: a heading never carries a number (already split into
+            # `etiqueta`) and must not be ALL CAPS. The number is dropped and an
+            # all-caps heading is rewritten to sentence case, acronyms kept.
+            texto_h2 = sentence_case_titulo(texto_h2)
             hid += 1
             sec = {"hid": hid, "nivel": nivel, "texto": texto_h2, "etiqueta": etiqueta}
             secciones.append(sec)
@@ -1112,6 +1247,35 @@ def analizar(md_path, base_dir, log, aplicar_deglue=True,
                 portada_lineas.append({"tipo": "dato", "texto": limpia})
                 bloques.append({"tipo": "portada_dato", "texto": limpia})
             i += 1
+            continue
+
+        # --- markdown block quote ----------------------------------------
+        # APA 7: a textual quote of more than 40 words goes in its own
+        # paragraph, with a 1.27 cm left indent, no quotation marks and double
+        # spacing. The .md marks it as a Markdown block quote ('>'), and one or
+        # more consecutive '>' lines (including a bare '>' used as a blank
+        # separator) are joined into a single paragraph.
+        if t.startswith(">"):
+            partes = []
+            k = i
+            while k < n:
+                tq = lineas[k].strip()
+                if not tq.startswith(">"):
+                    break
+                interior = unescape_md(tq[1:].strip())
+                interior = interior.replace("&nbsp;", " ").replace("\u00a0", " ")
+                interior = interior.strip()
+                if interior:
+                    partes.append(interior)
+                k += 1
+            texto_cita = re.sub(r"\s+", " ", " ".join(partes)).strip()
+            if texto_cita:
+                bloques.append({
+                    "tipo": "cita",
+                    "texto": texto_cita,
+                    "segmentos": parse_inline(texto_cita),
+                })
+            i = k
             continue
 
         # --- paragraph / list --------------------------------------------
@@ -1200,6 +1364,62 @@ def analizar(md_path, base_dir, log, aplicar_deglue=True,
             b["tipo"] = "nota_tabla"
             b["indice"] = destino
             b.pop("segmentos", None)
+
+    # --- notes written in the .md, right under a table or a figure --------
+    # MinerU/Docling do not always deliver the footnote as data, and in practice
+    # the .md carries it as an ordinary paragraph: "Nota. Elaboracion propia".
+    # Without this pass that paragraph reaches the .docx as body text (indented,
+    # in the middle of the document) and the table/figure gets the DEFAULT note
+    # instead: the document ends up with two notes, one of them wrong.
+    #
+    # The .md wins over the footnote of the json: `enriquecer_desde_docling`
+    # only writes a note when there is none, exactly like it already does with
+    # the title of a table that the .md already names. The explicit override
+    # `--notas-tabla-json` (applied later) still wins over both.
+    def _destino_de_nota(pos):
+        """Index of the table/figure the note at `pos` belongs to, and whether it
+        is a figure. Looks forward first (the note goes BELOW) and then backward,
+        skipping the caption paragraphs already consumed by the pass above."""
+        for salto in (1, -1):
+            for pasos in range(1, 4):
+                j = pos + salto * pasos
+                if j < 0 or j >= len(bloques):
+                    break
+                v = bloques[j]
+                if v.get("tipo") in ("tabla", "figura"):
+                    return v["indice"], v.get("tipo") == "figura"
+                # A consumed caption belongs to the table/figure: the note can sit
+                # on the far side of it. Anything else ends the search.
+                if v.get("tipo") != "nota_tabla":
+                    break
+        return None, None
+
+    for k, b in enumerate(bloques):
+        if b.get("tipo") != "p" or "segmentos" not in b:
+            continue
+        mn = RE_NOTA_LINEA.match(b["texto"])
+        if not mn:
+            continue
+        destino, es_figura = _destino_de_nota(k)
+        if destino is None:
+            continue
+        nota_md = fix_colon_spacing(mn.group(1)).strip()
+        if not nota_md:
+            continue
+        objetos = figuras if es_figura else tablas
+        if objetos[destino].get("nota"):
+            # Already has a note; the .md line is dropped instead of duplicated.
+            b["tipo"] = "nota_tabla" if not es_figura else "nota_figura"
+            b["indice"] = destino
+            b.pop("segmentos", None)
+            continue
+        objetos[destino]["nota"] = nota_md
+        objetos[destino]["nota_origen"] = "md"
+        b["tipo"] = "nota_tabla" if not es_figura else "nota_figura"
+        b["indice"] = destino
+        b.pop("segmentos", None)
+        log("%s note (line %d) taken from the .md: %s"
+            % ("Figure" if es_figura else "Table", k + 1, nota_md[:60]))
 
     # --- table and figure numbering ---------------------------------
     for k, tb in enumerate(tablas):
@@ -1337,6 +1557,11 @@ def detectar_portada(lineas, overrides):
 
     The institutional fields (facultad, sede, NRC) are detected by pattern and
     are optional: if the document does not bring them, they are asked about. They are never invented.
+
+    Returns `(portada, consumidos)`: `consumidos` holds the indexes of the lines
+    that were actually turned into a cover field. Anything left over is NOT a
+    cover field, so the caller promotes it to body text (`promover_datos_portada`):
+    a line before the first section must never be silently dropped.
     """
     portada = {
         "titulo": None,
@@ -1350,11 +1575,13 @@ def detectar_portada(lineas, overrides):
         "fecha": None,
         "logo": None,
     }
+    consumidos = set()
 
-    for ln in lineas:
+    for idx, ln in enumerate(lineas):
         txt = ln["texto"].strip()
         if ln["tipo"] == "titulo":
             portada["titulo"] = portada["titulo"] or txt
+            consumidos.add(idx)
             continue
 
         mn = RE_NRC.search(txt)
@@ -1364,6 +1591,7 @@ def detectar_portada(lineas, overrides):
             portada["materia_nrc"] = "NRC " + mn.group(1)
             if _es_nombre_persona(resto):
                 portada["autores"] = [p.strip() for p in resto.split(",")]
+            consumidos.add(idx)
             continue
 
         mdoc = re.search(r"(profesor|profesora|docente|teacher)\s*[:\-]?\s*(.*)$", txt, re.I)
@@ -1373,35 +1601,47 @@ def detectar_portada(lineas, overrides):
             portada["docente"] = partes[0] if partes else nombre
             if len(partes) > 1 and partes[1]:
                 portada["docente_titulo"] = partes[1]
+            consumidos.add(idx)
             continue
 
         # The institution line usually brings facultad + vicerrectoria + sede.
         if re.search(r"facultad|vicerrector|universidad|corporaci\u00f3n", txt, re.I):
+            asignado = False
             if not portada["vicerrectoria"] and re.search(r"vicerrector", txt, re.I):
                 m = re.search(r"vicerrector\u00eda[^,]*", txt, re.I)
                 if m:
                     portada["vicerrectoria"] = m.group(0).strip()
                     txt = (txt[: m.start()] + " " + txt[m.end():]).strip(" ,")
+                    asignado = True
             if not portada["sede"] and re.search(r"\bsede\b", txt, re.I):
                 m = re.search(r"\bsede\b.*$", txt, re.I)
                 if m:
                     portada["sede"] = m.group(0).strip()
                     txt = (txt[: m.start()] + " " + txt[m.end():]).strip(" ,")
+                    asignado = True
             if not portada["facultad"] and re.search(r"facultad|universidad|corporaci\u00f3n", txt, re.I):
                 portada["facultad"] = re.sub(r"\s+", " ", txt).strip(" ,")
+                asignado = True
+            # Only a line that really fed a field is consumed: a second
+            # institution line with nothing left to fill is body text, not noise.
+            if asignado:
+                consumidos.add(idx)
             continue
 
         md = RE_DATE.search(txt)
         if md and not portada["fecha"]:
             portada["fecha"] = "%s de %s de %s" % (md.group(1), md.group(2).capitalize(), md.group(3))
+            consumidos.add(idx)
             continue
 
         if not portada["autores"] and "," in txt and _es_nombre_persona(txt):
             portada["autores"] = [p.strip() for p in txt.split(",") if p.strip()]
+            consumidos.add(idx)
             continue
 
         if not portada["autores"] and _es_nombre_persona(txt):
             portada["autores"] = [txt]
+            consumidos.add(idx)
 
     # the user's overrides (what they answered when asked) always win
     for k, v in (overrides or {}).items():
@@ -1444,7 +1684,47 @@ def detectar_portada(lineas, overrides):
         faltan.append("logo")
 
     portada["campos_faltantes"] = faltan
-    return portada
+    return portada, consumidos
+
+
+def promover_datos_portada(bloques, portada_lineas, consumidos):
+    """Renders, in the body, every pre-section line the cover did NOT claim.
+
+    The cover is inferred from the lines that come before the first heading
+    (`detectar_portada`) and it only uses the ones that match a field. The rest
+    were appended as `portada_dato` blocks and then dropped by build-docx.js,
+    so an abstract sentence or any stray prose before the first '##' vanished.
+    Here those leftovers become ordinary body paragraphs, in their original
+    order, so no line of the .md is ever lost. The ones the cover DID use stay
+    as `portada_dato` (they belong on the cover, not in the body).
+    """
+    datos = [i for i, ln in enumerate(portada_lineas) if ln["tipo"] == "dato"]
+    sobrantes = set(i for i in datos if i not in consumidos)
+    if not sobrantes:
+        return bloques
+    # Both lists are appended together in the parser (only the cover branch
+    # writes a "dato" and a "portada_dato"), so the N-th "dato" is the N-th
+    # "portada_dato": the positional lockstep is the mapping.
+    out = []
+    pos = 0
+    for b in bloques:
+        if b.get("tipo") != "portada_dato":
+            out.append(b)
+            continue
+        idx_linea = datos[pos] if pos < len(datos) else None
+        pos += 1
+        if idx_linea not in sobrantes:
+            out.append(b)
+            continue
+        texto = b.get("texto", "")
+        mnum_item = re.match(r"^(\d+[\.\)]|[" + BULLET_CHARS + r"])\s+", texto)
+        out.append({
+            "tipo": "lista" if mnum_item else "p",
+            "texto": texto,
+            "marcador": (mnum_item.group(1) if mnum_item else None),
+            "segmentos": parse_inline(texto),
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1488,7 +1768,26 @@ def main():
                                   "convert bbox into inches")
     ap.add_argument("--ancho-max-tabla", type=float, default=6.5,
                     help="usable width in inches (Letter with 1-inch margins)")
+    ap.add_argument("--fuente", metavar="FAMILIA",
+                    help="typeface for the whole document (APA 7 allows one): "
+                         "Times New Roman, Arial, Calibri, Lucida Sans Unicode, "
+                         "Georgia or Computer Modern. The size follows the guide "
+                         "unless --tamano-fuente is given")
+    ap.add_argument("--tamano-fuente", type=float, metavar="PT",
+                    help="font size in points; overrides the guide size of --fuente")
     args = ap.parse_args()
+
+    # Typeface: one family for the whole document. Default is Times New Roman 12.
+    nombre_fuente = args.fuente or fuentes_mod.FAMILIA_POR_DEFECTO
+    if not fuentes_mod.es_familia_valida(nombre_fuente):
+        permitidas = ", ".join(f for f, _ in fuentes_mod.familias_disponibles())
+        print("ERROR: unknown font %r. The APA 7 fonts are: %s"
+              % (args.fuente, permitidas), file=sys.stderr)
+        return 2
+    tamano_fuente = (args.tamano_fuente
+                     or fuentes_mod.tamano_por_defecto(nombre_fuente))
+    tipografia = {"nombre": fuentes_mod.etiqueta_familia(nombre_fuente),
+                  "pt": tamano_fuente}
 
     global TERMINOS_PROTEGIDOS
     if args.terminos_protegidos:
@@ -1518,6 +1817,7 @@ def main():
     log("sha256       : %s" % sha256_of(args.md))
     log("Size         : %d bytes" % os.path.getsize(args.md))
     log("Base dir     : %s" % base_dir)
+    log("Typeface     : %s %g pt" % (tipografia["nombre"], tipografia["pt"]))
     log("")
 
     # MinerU/Docling deliver the prose .md next to a *_content_list.json with the
@@ -1645,20 +1945,33 @@ def main():
     # if the .md or the json brought it, so in an ordinary document none appeared and the verifier did not
     # detect it: it was delivered without one.
     NOTA_PROPIA = "Elaboración propia"
+    # These are the ones the .md did NOT source: they get the "Elaboración
+    # propia" default, but that assumption is never silent (see the blocking
+    # question below).
+    sin_atribucion = []
     for tb in res["tablas"]:
         if not tb.get("nota"):
             tb["nota"] = NOTA_PROPIA
             tb["nota_origen"] = "default"
+            sin_atribucion.append(("tabla", tb["indice"]))
     for fg in res["figuras"]:
         if not fg.get("nota"):
             fg["nota"] = NOTA_PROPIA
             fg["nota_origen"] = "default"
+            sin_atribucion.append(("figura", fg["indice"]))
 
     # --- portada ---------------------------------------------------------
     overrides = {}
     if args.portada and os.path.isfile(args.portada):
         overrides = read_json(args.portada)
-    portada = detectar_portada(res["portada_lineas"], overrides)
+    portada, consumidos = detectar_portada(res["portada_lineas"], overrides)
+
+    # Whatever the cover did not take is body text, not waste: promote it so a
+    # line written before the first section is rendered instead of dropped.
+    sobrantes = [ln for i, ln in enumerate(res["portada_lineas"])
+                 if ln["tipo"] == "dato" and i not in consumidos]
+    res["bloques"] = promover_datos_portada(res["bloques"], res["portada_lineas"],
+                                            consumidos)
 
     log("--- Detected cover ---")
     for k in ("titulo", "autores", "facultad", "vicerrectoria", "materia_nrc",
@@ -1666,6 +1979,11 @@ def main():
         log("  %-15s : %s" % (k, portada.get(k)))
     log("  MISSING FIELDS (ask the user, do NOT infer): %s"
         % (", ".join(portada["campos_faltantes"]) or "(none)"))
+    if sobrantes:
+        log("  Moved to the body (%d line(s) before the first section that are "
+            "not cover fields):" % len(sobrantes))
+        for ln in sobrantes:
+            log("    * %s" % ln["texto"])
     log("")
 
     # --- index policy --------------------------------------------
@@ -1718,12 +2036,20 @@ def main():
 
     # Cover fields that are ASKED about but do NOT block: the document is
     # built just fine without them. This is consistent with the warnings (critico=False) that
-    # verificar-pdf.py emits for the same two fields.
-    PORTADA_SIN_BLOQUEAR = {"logo", "docente_titulo"}
+    # verificar-pdf.py emits for the same fields.
+    #
+    # vicerrectoria and materia_nrc used to block delivery. They are optional
+    # (references/institutional-cover.md): the cover prints the line only if the
+    # value exists, and a missing one never leaves a blank gap.
+    PORTADA_SIN_BLOQUEAR = {"logo", "docente_titulo", "vicerrectoria"}
     PREGUNTA_PORTADA = {
         "logo": ("There is no logo on the cover. If one is provided it is placed above the "
                  "title. Is it included or omitted?"),
         "docente_titulo": "What is the title or profession of the docente?",
+        "materia_nrc": ("There is no course/NRC line on the cover. Provide the course and its "
+                        "code, or omit the line?"),
+        "vicerrectoria": ("There is no vice-rector's office line on the cover. Provide it, or "
+                          "omit the line?"),
     }
 
     for c in portada["campos_faltantes"]:
@@ -1770,6 +2096,33 @@ def main():
                 "titulos-figura.json as {\"%d\": \"...\"} and run the "
                 "parser again with --titulos-figura-json." % fg["indice"])
 
+    # Attribution of tables and figures: when the .md does not state the source,
+    # the note is set to "Elaboración propia" (nota_origen "default"). That
+    # authorship assumption must not be silent, so the user is asked whether they
+    # will provide the attribution or set them all as their own work.
+    if sin_atribucion:
+        idx_t = [i for (t, i) in sin_atribucion if t == "tabla"]
+        idx_f = [i for (t, i) in sin_atribucion if t == "figura"]
+        partes = []
+        if idx_t:
+            partes.append("table(s) %s" % ", ".join(str(i) for i in idx_t))
+        if idx_f:
+            partes.append("figure(s) %s" % ", ".join(str(i) for i in idx_f))
+        preguntar(
+            "atribucion_fuente", True, "atribucion", "eleccion_binaria",
+            "Document", None,
+            "No source note for %s; they would default to 'Elaboración propia'. "
+            "Will you provide the attribution - De \"Título del documento\" por "
+            "Autor, año de publicación. (URL), or Adaptado de ... if you changed "
+            "it - or set them all as 'Elaboración propia'?" % (" and ".join(partes)),
+            ["proporcionar_atribucion", "elaboracion_propia"],
+            "To provide it: write {\"<indice>\": \"De \\\"...\\\" por Autor, año. "
+            "(URL)\"} (or \"Adaptado de ...\") in notas-tabla.json / "
+            "notas-figura.json and re-run the parser with --notas-tabla-json / "
+            "--notas-figura-json. To confirm your own authorship, write the note "
+            "'Elaboración propia' explicitly in those JSONs: that clears the "
+            "default and this question.")
+
     if res["referencias"]:
         preguntar("cursiva_referencias", False, "referencias", "revision",
                   "References", None,
@@ -1806,6 +2159,7 @@ def main():
             "bytes": os.path.getsize(args.md),
             "base_dir": base_dir,
         },
+        "tipografia": tipografia,
         "opciones": {
             "numerar_pagina_portada": False,
             "dedupe_toc": False,
