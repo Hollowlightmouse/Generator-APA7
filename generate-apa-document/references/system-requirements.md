@@ -1,8 +1,8 @@
 # System Requirements
 
 Tools the pipeline needs to convert a `.md` into a `.docx` and then into
-a `.pdf`. **Microsoft Word is not a requirement**: the conversion is done by
-LibreOffice in headless mode.
+a `.pdf`. Microsoft Word is optional: `auto` prefers it only after a real export
+probe and falls back to LibreOffice in headless mode.
 
 Everything needed is resolved automatically, without hand-written paths and
 without a particular shell. This file explains how it is checked and how to
@@ -17,7 +17,8 @@ adjust it if detection fails.
 | `docx` library (npm) | build the cover page, indexes, tables and figures | searched in `node_modules` | `npm install docx@9.7.1 --no-save` |
 | Python 3.12 | create the virtual environment that runs the checks | searched on `PATH` and in the usual locations | per package manager, see below |
 | `pymupdf` **1.28.2** | verify the resulting `.pdf` | imported inside the virtual environment | `pip install pymupdf==1.28.2` (into `.venv`) |
-| LibreOffice | **only engine** for `.docx` to `.pdf` conversion | `soffice --version` | per package manager, see below |
+| Microsoft Word | preferred engine when `auto` has a successful probe | real `.docx` to `.pdf` probe | installed with Microsoft Office |
+| LibreOffice | cross-platform fallback for `.docx` to `.pdf` conversion | `soffice --version` | per package manager, see below |
 
 The installer picks the available package manager and then runs the check
 again:

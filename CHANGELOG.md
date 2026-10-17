@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-10-17
 
 ### Added
 
@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `SKILL.md`, `README.md` y `references/system-requirements.md`: contrato
+  separado por audiencia, Word preferido tras sondeo y LibreOffice como
+  fallback, con entradas opcionales documentadas correctamente.
+- `scripts/apa7.py`: `build --help` ya no requiere que `docx` esté instalado y
+  `install` informa el preflight antes de solicitar confirmación.
+- `.github/workflows/ci.yml`: instala la versión fijada de `docx` en `.work`,
+  valida la rama `Skill-Academic` y hace obligatorio el dry-run propio.
 - `scripts/apa7.py`: validación estricta del nombre de motor, resolución única antes del build, cmd_export evita consultas a LibreOffice cuando usa Word, limpieza selectiva de perfil LibreOffice.
 - `scripts/build-docx.js`: la imagen de figura usa `keepNext` cuando existe nota; la nota se escribe sin duplicar etiqueta `Nota.`.
 - `scripts/verificar-pdf.py`: ignora fuentes usadas solo en espacios (no visibles) para aceptar Aptos en TOC de Word; criterio geométrico de nota bajo imagen, con aceptación documentada si pasa a página siguiente.
@@ -33,8 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Test coverage
 
-- 386 tests en verde en `scripts/tests`. Verificación real de corpus Word/LibreOffice OK.
+- 388 tests en verde en `scripts/tests`. Verificación real de parser/build y
+  sondeo de Word OK.
 
+
+## [Unreleased]
+
+Sin cambios todavía.
 
 ## [1.0.0] - 2026-10-03
 

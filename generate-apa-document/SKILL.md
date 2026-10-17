@@ -1,13 +1,20 @@
 ---
 name: generate-apa-document
-description: Builds or structures an academic Word (.docx) and PDF document following APA 7th edition, from a source Markdown (.md) file, its images and the layout JSON files (content_list, content_list_v2, middle, model) that carry figure size and position. ALWAYS USE when the user asks to assemble or produce an academic APA document or PDF, formalize a paper, set it up with an institutional cover page, table of contents, list of tables, list of figures and APA references, or apply APA formatting to a text. Activation is by INTENT, not keywords: "generate the APA PDF", "armá mi trabajo en formato APA", "estructura este informe con norma APA", "pasame esto a APA con portada y referencias" all apply. Also use when required data is missing and the user must be asked before continuing. Exports the PDF with headless LibreOffice and does NOT require Microsoft Word. DO NOT USE if the user only wants to read, summarize, translate or spell-check a text.
+description: Builds or structures an academic Word (.docx) and PDF document following APA 7th edition, from a source Markdown (.md) file, its images and the layout JSON files (content_list, content_list_v2, middle, model) that carry figure size and position. ALWAYS USE when the user asks to assemble or produce an academic APA document or PDF, formalize a paper, set it up with an institutional cover page, table of contents, list of tables, list of figures and APA references, or apply APA formatting to a text. Activation is by INTENT, not keywords: "generate the APA PDF", "armá mi trabajo en formato APA", "estructura este informe con norma APA", "pasame esto a APA con portada y referencias" all apply. Also use when required data is missing and the user must be asked before continuing. Exports the PDF with Microsoft Word when a real probe confirms it works, and falls back to headless LibreOffice when Word is unavailable. Microsoft Word is optional; LibreOffice remains the supported cross-platform fallback. DO NOT USE if the user only wants to read, summarize, translate or spell-check a text.
 ---
 
 # Generate an APA 7 academic document (Word + PDF)
 
-Turns a source `.md` (plus its images and layout JSON) into a `.docx` with an institutional cover page, a table of contents / list of tables / list of figures generated with the `docx` library as **real `TOC` fields** (their page numbers are measured in a **double pass**: the first `.docx` is exported to a throwaway PDF with LibreOffice, `scripts/paginas-de-pdf.py` reads the real page of every entry, and the second build ships those numbers as the cached field result) and APA 7 references — and exports that same document to PDF with **headless LibreOffice**, the only conversion engine. Both files are delivered.
+Turns a source `.md` (plus its optional images and layout JSON) into a `.docx`
+with an institutional cover page, a table of contents / list of tables / list
+of figures generated with the `docx` library as **real `TOC` fields**. The
+document is exported to PDF with the selected engine: `auto` prefers Word only
+after a real export probe and otherwise uses headless LibreOffice. Both files
+are delivered.
 
-**Mandatory engine: LibreOffice. Microsoft Word is NOT a requirement.**
+**PDF engines:** Word is preferred by `auto` only when proven usable; headless
+LibreOffice is the fallback. An explicit `--motor word` or
+`--motor libreoffice` never silently switches to the other engine.
 
 All paths in this document are **relative to the skill root**
 (the folder that contains this `SKILL.md`). Every command below is run from
@@ -52,10 +59,10 @@ before generating** (see "Mandatory questions" below).
 ## Required inputs
 
 1. The source **`.md`** (text, headings, markdown tables, references, image markers `![]()`).
-2. The **images** referenced in the `.md` (`images/` folder or loose files).
-3. The **layout JSON** (`*_content_list.json`, `*_content_list_v2.json`, `*_middle.json`, `*_model.json`, or only some of them) — used only to learn the real size and position of each image and table.
+2. Optional **images** referenced in the `.md` (`images/` folder or loose files).
+3. Optional **layout JSON** (`*_content_list.json`, `*_content_list_v2.json`, `*_middle.json`, `*_model.json`) — used only to learn the real size and position of each image and table.
 
-If any is missing, ask for it before continuing. **The `.md` is mandatory; the JSON and images are optional.** The pipeline accepts:
+If the `.md` is missing, ask for it before continuing. **The images and JSON are optional.** The pipeline accepts:
 
 - `.md` only → text document. No figures and no lists of tables/figures.
 - `.md` + `images/` → figures at a reasonable fixed size.
@@ -82,8 +89,9 @@ interpreter on `PATH` is older than the floor, a pin differs, LibreOffice came
 from a non-standard place. It is **not** a failure and never changes the result,
 so there is nothing to install because of it.
 
-`install` asks for confirmation before changing the machine, which needs a
-terminal. Pass `--yes` to skip the prompt. `--only <tool>` installs a single
+`install` first reports the preflight and the tools it intends to resolve, then
+asks for confirmation before changing the machine, which needs a terminal.
+Pass `--yes` to skip the prompt explicitly. `--only <tool>` installs a single
 tool (repeatable) and `--dry-run` prints the plan and changes nothing, which is
 the safe way to inspect it.
 
@@ -225,20 +233,20 @@ source `.md`:
    - The TOC is generated **always**; the list of tables and the list of figures **only if the document has them**. If it does not, **ask** to confirm and do **not** generate the empty list.
    - Tables with `width` + `columnWidths` + `layout: FIXED`: LibreOffice does not render tables without defined column widths.
    - Captions with a **real `SEQ` field** (`SEQ Tabla` / `SEQ Figura`), which LibreOffice **does** resolve, because `TOC \c "Tabla"` only collects captions that carry that SEQ. Headings carry an applied `outlineLevel` for `TOC \u`.
-   - **Two-pass build.** `build` runs node once, then (if the manifest asks for TOC fields and LibreOffice is available) exports to a throwaway PDF in `<md>_apa/logs/`, measures it with `paginas-de-pdf.py` into `paginas.json`, and runs node a second time with `--paginas-json`. Both passes are inside the one `build` command, and the throwaway PDF is deleted once the second pass succeeds. If the venv or LibreOffice is missing, the first `.docx` is kept and Word fills the numbers in on open (<code>updateFields</code>) — a degradation, not a failure. Needs LibreOffice (already mandatory in STEP 0).
+   - **Two-pass build.** `build` runs node once, then (if the manifest asks for TOC fields and a PDF engine is available) exports to a throwaway PDF in `<md>_apa/logs/`, measures it with `paginas-de-pdf.py` into `paginas.json`, and runs node a second time with `--paginas-json`. Both passes are inside the one `build` command, and the throwaway PDF is deleted once the second pass succeeds. If no engine or venv is available, the first `.docx` is kept and Word fills the numbers in on open (<code>updateFields</code>) — a degradation, not a failure.
    - **Aborts with code 4 if a title or caption is missing.** There is no `(sin título)`: it is a defect, not a text.
    - **Figure note BEFORE the image** and with `keepNext`, so the note is not orphaned on the previous page. **Table note AFTER the table**.
    - **Tables with HORIZONTAL borders only**: top border, a line under the header row and bottom border. No verticals and no lines between data rows.
    - **Automatic per-table orientation**: the body is split into stretches and each stretch is a `.docx` section. A table moves on its own to a **landscape page** (with its title and note) when it does not fit in portrait: 6 or more columns, or cells so long that rotating the page genuinely relieves them. The criterion is legibility/width, **not the number of rows**. Afterwards the text returns to portrait. See `references/apa7-format.md`.
    - Level-1 headings break with `pageBreakBefore`, **not** with a loose paragraph carrying a `PageBreak`: that empty paragraph produces a blank page when the previous one is already full.
 
-6. **Export to PDF with LibreOffice**:
+6. **Export to PDF**:
 
    ```bash
    python scripts/apa7.py export --docx "<path>/document.docx" [--carpeta-trabajo "<dir>"]
    ```
 
-   It prints **only** the resulting PDF path on stdout and puts the log in the working folder (`<stem>_apa/logs/03-export.log`), so the path can be captured directly. Progress and warnings go to stderr. The PDF goes **next to the `.docx`**, with the same name. With no `--docx` at all, `export` looks in the **current folder** (the one that holds the `.md` and the `.docx`, *not* the working folder) and takes its single `.docx`; with zero or two or more it says so instead of guessing. With `--outdir` and no `--carpeta-trabajo` the old behaviour is kept verbatim (PDF in `--outdir`, log in `--outdir/_logs/`). It works on a temporary copy with an **isolated LibreOffice profile** per run, which is deleted at the end; because of that isolation a LibreOffice the user has open is **not** a problem and is left alone. Only the skill's **own** leftovers (the isolated `lo_profile` runs) are closed. `--cerrar-libreoffice` closes **every** LibreOffice process first and warns that unsaved documents are lost. The `Could not find platform independent libraries <prefix>` warning on stderr is benign. Do **not** launch `soffice` through a shell background operator or `Start-Process`: the child inherits the pipe handle and the reader hangs (see `references/word-toc-fields.md`).
+   It prints **only** the resulting PDF path on stdout and puts the log in the working folder (`<stem>_apa/logs/03-export.log`), so the path can be captured directly. Progress and warnings go to stderr. The PDF goes **next to the `.docx`**, with the same name. With no `--docx` at all, `export` looks in the **current folder** (the one that holds the `.md` and the `.docx`, *not* the working folder) and takes its single `.docx`; with zero or two or more it says so instead of guessing. With `--outdir` and no `--carpeta-trabajo` the old behaviour is kept verbatim (PDF in `--outdir`, log in `--outdir/_logs/`). In `auto`, Word is used only after a real export probe; otherwise LibreOffice runs on a temporary copy with an **isolated profile** per run. An explicit engine never silently falls back to the other. `--cerrar-libreoffice` closes **every** LibreOffice process first and warns that unsaved documents are lost. The `Could not find platform independent libraries <prefix>` warning on stderr is benign. Do **not** launch `soffice` through a shell background operator or `Start-Process`: the child inherits the pipe handle and the reader hangs (see `references/word-toc-fields.md`).
 
 7. **Verify before delivering** with `python scripts/apa7.py verify --pdf "document.pdf" --manifiesto "MANIFEST.json"`: cover in 3 zones and members in a single paragraph (**this is checked, as a warning**), indices with the correct page number, captions with number and title, tables with content, **each table with its note below it in the PDF**, **each figure note above its image**, references with hanging indent. With no `--json` the report goes to `<md>_apa/datos/verificacion.json`. `verify` picks the `.venv` interpreter on its own, because that is where `pymupdf` lives. The cover warnings (logo or instructor title not asked about) **are not failures**: they are reported to the user and the document is delivered. If a critical check fails, fix and export again. **A failed verification never deletes anything**: the PDF and the working folder stay on disk to be inspected.
 
@@ -247,7 +255,7 @@ source `.md`:
 ## Rules already defined (do not ask again)
 
 - It activates by **intent**: asking for an academic document assembled in APA, no need to say the words "APA PDF" (see "When it activates").
-- Export engine: **headless LibreOffice, only**. Word is not a requirement and is not used.
+- Export engine: `auto` prefers Word after a real probe and falls back to headless LibreOffice. Explicit engine choices never silently fall back.
 - **STEP 0 mandatory** before transforming.
 - Missing cover field → ask (add or omit), including the instructor's title.
 - **Cover in 3 zones**: title at the top (optional logo **above** the title), members vertically centered, institutional block anchored at the bottom. Built with a 3-row borderless table, not with filler paragraphs. **Logo**: only if the user provides it, but **always ask**: if it was not asked about, the verifier flags it.

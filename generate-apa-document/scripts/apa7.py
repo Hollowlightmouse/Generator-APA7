@@ -689,6 +689,10 @@ def _cmd_install(args):
         rutas.log(message)
 
     step("--- Initial environment check ---")
+    sys.stderr.write(
+        "The preflight below reports the current environment. Missing tools are "
+        "listed before any installation is attempted; each installation step "
+        "requires confirmation unless --yes was explicitly supplied.\n")
     if cmd_check(None) == 0:
         step("Nothing to install: environment complete.")
         return 0
@@ -973,6 +977,30 @@ def _forward(rest, interpreter, script, label, usage):
         sys.stderr.write("ERROR: %s not found at %s\n" % (label, script))
         return 1
     return subprocess.call([str(interpreter), str(script)] + list(rest))
+
+
+def _forwarded_help(command):
+    """Print dependency-free help for a forwarded subcommand.
+
+    The target scripts may import optional runtime dependencies before argparse
+    can answer `--help` (notably build-docx.js imports `docx`). Help is a
+    discovery surface and must remain available before installation.
+    """
+    usage = {
+        "parse": "parse --md FILE.md [--out MANIFEST.json] [options]",
+        "build": "build --manifiesto MANIFEST.json [--out salida.docx] [options]",
+        "verify": "verify --pdf salida.pdf --manifiesto MANIFEST.json [options]",
+    }
+    descriptions = {
+        "parse": "PHASE 1: convert Markdown and layout data into MANIFEST.json",
+        "build": "PHASE 2: build an APA 7 .docx from MANIFEST.json",
+        "verify": "PHASE 4: verify the generated PDF against MANIFEST.json",
+    }
+    sys.stdout.write("usage: apa7.py %s\n\n%s\n\n"
+                     "The full command requires the skill dependencies. "
+                     "Run `apa7.py check` first.\n"
+                     % (usage[command], descriptions[command]))
+    return 0
 
 
 def cmd_parse(args):
@@ -1315,6 +1343,9 @@ def main(argv=None):
     # that; the target script just complains about a missing value.
     if argv and argv[0] in FORWARDING:
         handler = FORWARDING[argv[0]]
+        if argv[0] == "build" and any(argument in ("-h", "--help")
+                                       for argument in argv[1:]):
+            return _forwarded_help(argv[0])
         return _run(handler, argparse.Namespace(rest=argv[1:], unknown=[]))
 
     parser = argparse.ArgumentParser(

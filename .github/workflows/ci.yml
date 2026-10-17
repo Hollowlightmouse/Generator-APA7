@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "fix/**"]
+    branches: [main, Skill-Academic, "fix/**"]
   pull_request:
 
 jobs:
@@ -28,6 +28,10 @@ jobs:
         with:
           node-version: "lts/*"
 
+      - name: Install pinned docx dependency
+        shell: bash
+        run: mkdir -p .work && cd .work && npm install docx@9.7.1 --no-save --no-package-lock --no-audit --no-fund
+
       - name: Run the test suite
         shell: bash
         env:
@@ -41,5 +45,4 @@ jobs:
 
       - name: Dry-run the installer
         shell: bash
-        continue-on-error: true
         run: python scripts/apa7.py install --dry-run

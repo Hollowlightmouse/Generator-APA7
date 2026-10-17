@@ -1005,6 +1005,14 @@ class TestForwarding(CheckHarness):
         self.assertIn("--help", calls[0])
         self.assertTrue(calls[0][1].endswith("md-a-manifiesto.py"))
 
+    def test_build_help_does_not_require_docx_dependency(self):
+        code, calls, out, err = self.call(["build", "--help"])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("usage: apa7.py build", out)
+        self.assertIn("dependencies", out)
+        self.assertEqual(err, "")
+
     def test_parse_uses_the_current_interpreter(self):
         _, calls, _, _ = self.call(["parse", "--md", "a.md"])
         self.assertEqual(calls[0][0], sys.executable)

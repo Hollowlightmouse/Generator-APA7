@@ -2,7 +2,8 @@
 
 Skill `generate-apa-document`. Builds a **Word (.docx) and PDF** academic document following the **APA 7th edition** rules, ready to submit: institutional cover page, table of contents and lists of tables/figures with real page numbers, all from a source Markdown `.md` (extracted with MinerU/Docling, for example).
 
-> **Export engine: LibreOffice (headless). Microsoft Word is not required.**
+> **Export engine:** Word is preferred when a real probe confirms it can export;
+> headless LibreOffice is the fallback. Microsoft Word is optional.
 
 ---
 
@@ -28,7 +29,8 @@ It is not a PDF-to-Word converter: it starts from a `.md` that already exists. W
 | **Node.js LTS + npm** | generating the `.docx` with the `docx` library | `winget install OpenJS.NodeJS.LTS`, `brew install node`, or the distro package |
 | **`docx` library (npm)** | building the cover, TOC, indices and tables | `npm install docx@9.7.1 --no-save` |
 | **`pymupdf` 1.28.2** | verifying the final PDF | installed into `.venv`, not into the system Python |
-| **LibreOffice** | **the only engine** for `.docx → .pdf` conversion | `winget install TheDocumentFoundation.LibreOffice`, `brew install --cask libreoffice`, or the distro package |
+| **Microsoft Word** | preferred engine when `auto` confirms a real export probe | installed separately with Microsoft Office |
+| **LibreOffice** | cross-platform fallback for `.docx → .pdf` conversion | `winget install TheDocumentFoundation.LibreOffice`, `brew install --cask libreoffice`, or the distro package |
 | **Internet connection** | package manager, npm and pip downloads | — |
 
 Everything above except the internet is installed by `apa7.py install`, which picks the available package manager (`winget`, `brew`, `apt`, `dnf` or `pacman`) or prints the command to run by hand.
@@ -48,7 +50,8 @@ Tool paths overridable by environment variable: `APA7_SOFFICE`, `APA7_PYTHON`, `
    python scripts/apa7.py check
    ```
 
-   If it returns `RESULT: MISSING`, the automatic installer resolves it and re-checks:
+   If it returns `RESULT: MISSING`, the installer reports the missing tools and
+   asks for confirmation before changing the environment, then re-checks:
 
    ```bash
    python scripts/apa7.py install
@@ -56,7 +59,8 @@ Tool paths overridable by environment variable: `APA7_SOFFICE`, `APA7_PYTHON`, `
 
    Add `--dry-run` to see the plan without changing anything, and `--yes` when running unattended.
 
-   > Do not install anything by hand and do not transform documents with missing tools.
+   > Do not transform documents with missing tools. Use `--yes` only when an
+   > unattended run has explicitly approved the installation.
 
 The `docx` dependency is installed in `generate-apa-document/.work/node_modules`, inside the skill itself: that way `require('docx')` always resolves, no matter where it is run from. That folder is generated state and is in `.gitignore`.
 
@@ -125,7 +129,9 @@ You do not pass `--out`, `--log`, `--outdir` or `--json`: each phase derives its
 4. **Parser** — `apa7.py parse` turns `.md` + layout JSON into `MANIFEST.json` (in `<md>_apa/datos/`): it enriches, deduplicates, splits glued words (protecting URLs, DOIs, e-mails, file names and any term passed with `--terminos-protegidos`), computes real image sizes from the JSON `bbox` and applies the default note. It leaves the pending questions in `diagnostico`.
 5. **Mandatory questions (STEP 0.5)** — if `pendientes_bloqueantes` is not empty, the user is asked (cover data, missing titles/captions, "no tables/figures" confirmation) and nothing is built until they are resolved. The cover answers are saved in `portada.json` and passed to the parser with `--portada`.
 6. **Build the `.docx`** — `apa7.py build` reads `MANIFEST.json` and builds the cover, TOC, indices, tables, figures and references, writing the `.docx` next to the source `.md`. It runs in **two passes**: it exports the first `.docx` to a throwaway PDF in `<md>_apa/logs/`, measures the real page of every entry with `paginas-de-pdf.py` and rebuilds with `--paginas-json` to cache those numbers in the `TOC` fields. The throwaway PDF is deleted once the second pass succeeds. Aborts with code 4 if a title or caption is missing.
-7. **Export to PDF** — `apa7.py export` converts `.docx → .pdf` with headless LibreOffice (temporary copy + isolated profile per run), writing the PDF next to the `.docx`.
+7. **Export to PDF** — `apa7.py export` uses Word when `auto` has a successful
+   probe and otherwise converts with headless LibreOffice (temporary copy +
+   isolated profile per run), writing the PDF next to the `.docx`.
 8. **Verify** — `apa7.py verify` (with `pymupdf`) checks the cover, indices with the correct page, captions, table notes below, figure notes above their image and hanging indent in references. If a critical check fails, it is fixed and exported again; nothing is deleted, so the failing PDF stays for inspection.
 9. **Deliver** — both files are delivered (`.docx` and `.pdf`).
 
@@ -136,7 +142,7 @@ Activation
              └─ apa7.py parse ──► MANIFEST.json (+ diagnostico)
                   └─ STEP 0.5  Blocking pending questions? ──► (yes) ask the user
                        └─ apa7.py build ──► document.docx
-                            └─ apa7.py export (headless LibreOffice) ──► document.pdf
+                            └─ apa7.py export (Word probe / LibreOffice fallback) ──► document.pdf
                                  └─ apa7.py verify ──► (failures) fix ──► re-export
                                       │       └── Delivery: .docx + .pdf next to the .md, plus informe_apa/ to inspect or delete
 ```
@@ -182,11 +188,15 @@ Generator-APA7/
 
 ## Limitations
 
-- **Windows, macOS and Linux.** The CLI is cross-platform: Python 3.9+ and no shell-specific syntax. The interpreter name is not hardcoded: use `python`, `python3` or `py`, whichever exists, and `apa7.py` prints the exact command it was run with. LibreOffice is found through `PATH` and the documented install locations; the Snap (`/snap/bin/libreoffice`) and Flatpak (`org.libreoffice.LibreOffice`) launchers and the `apt`/`dnf`/`pacman` plans are **best effort and have not been verified on this machine** — only the Windows locations have been exercised.
+- **Windows, macOS and Linux.** The CLI is cross-platform: Python 3.9+ and no shell-specific syntax. The interpreter name is not hardcoded: use `python`, `python3` or `py`, whichever exists, and `apa7.py` prints the exact command it was run with. Word is an optional Windows/macOS engine; LibreOffice is found through `PATH` and the documented install locations. The Snap (`/snap/bin/libreoffice`) and Flatpak (`org.libreoffice.LibreOffice`) launchers and the `apt`/`dnf`/`pacman` plans are **best effort and have not been verified on this machine** — only the Windows locations have been exercised.
 - It does not convert directly from PDF to Word: it starts from a `.md` already extracted by MinerU or Docling. The layout JSON is optional, but without it the figures do not keep their real size.
 - **APA 7 letter format with 1 in margins**, with no extra institutional rules.
 - The cover page carries no visible page number; numbering starts on page 2.
-- The `TOC` fields and the double pass are verified against **LibreOffice** (the shipped PDF). Word is not required and has not been tested locally; if a user updates the index fields *in Word*, the lists of tables/figures may keep only the number (Word's `\c` collects the caption paragraph, and the APA caption number and title are separate paragraphs). The delivered PDF already carries the full entries.
+- The `TOC` fields and the double pass use the selected PDF engine. Word is
+  preferred only after a successful probe; LibreOffice remains the fallback. If
+  a user updates index fields *in Word*, the lists of tables/figures may keep
+  only the number because Word's `\c` collects the caption paragraph and the
+  APA caption number and title are separate paragraphs.
 - **Automated checks (CI).** `.github/workflows/ci.yml` runs the test suite (`unittest`) plus `apa7.py check` and `install --dry-run` on Windows, macOS and Linux with Python 3.9 and 3.12. It does **not** install LibreOffice, so the end-to-end `.docx → .pdf` export is not exercised there. The workflow has not run yet (there is no CI history in the repository), so the cross-OS claims above are pending that first run.
 
 ## License
@@ -195,4 +205,5 @@ No license has been chosen yet. Until one is added, the code is **all rights res
 
 ---
 
-*Skill `generate-apa-document` — APA 7 academic document (.docx + PDF) without depending on Microsoft Word.*
+*Skill `generate-apa-document` — APA 7 academic document (.docx + PDF) with Word
+or headless LibreOffice selected explicitly or by probe.*
